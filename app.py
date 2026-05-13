@@ -192,9 +192,16 @@ def _coerce_clip_features(features: object) -> torch.Tensor:
 
 def compute_clipscore_compat(image: Image.Image, text: str) -> float:
     model, processor = get_clip_components(str(DEVICE))
+    max_length = getattr(model.config.text_config, "max_position_embeddings", 77)
 
     image_inputs = processor(images=[image], return_tensors="pt", padding=True)
-    text_inputs = processor(text=[text], return_tensors="pt", padding=True)
+    text_inputs = processor(
+        text=[text],
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+    )
 
     with torch.inference_mode():
         image_features = _coerce_clip_features(model.get_image_features(image_inputs["pixel_values"].to(DEVICE)))
