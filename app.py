@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hmac
 import io
 import math
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Final
 
 import streamlit as st
@@ -13,12 +16,32 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.multimodal.clip_score import CLIPScore
 from torchvision.transforms import functional as TF
 
+from storage import (
+    HISTORY_LIMIT,
+    MAX_IMAGE_SIZE_BYTES,
+    StorageStatus,
+    get_storage_status,
+    list_recent_image_evaluations,
+    list_recent_text_evaluations,
+    resolve_write_password,
+    save_image_evaluation,
+    save_text_evaluation,
+)
+
 
 APP_TITLE: Final[str] = "Evaluador multimodal de texto e imágenes"
 BERTSCORE_MODEL_NAME: Final[str] = "bert-base-multilingual-cased"
 CLIP_MODEL_NAME: Final[str] = "openai/clip-vit-base-patch32"
 FID_IMAGE_SIZE: Final[tuple[int, int]] = (299, 299)
 DEVICE: Final[torch.device] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@dataclass(frozen=True)
+class WriteAccessStatus:
+    configured: bool
+    unlocked: bool
+    can_write: bool
+    message: str
 
 
 def parse_references(text: str) -> list[str]:
@@ -151,6 +174,12 @@ def format_metric(value: float) -> str:
     return f"{value:.4f}"
 
 
+def format_timestamp(value: datetime | None) -> str:
+    if value is None:
+        return "Sin fecha"
+    return value.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+
+
 def validate_text_inputs(source_text: str, candidate_texts: list[str]) -> tuple[str, list[tuple[str, str]]]:
     cleaned_source = source_text.strip()
     if not cleaned_source:
@@ -172,6 +201,14 @@ def validate_image_inputs(text: str, uploaded_files: list) -> str:
         raise ValueError("Debes ingresar el texto para comparar con las imágenes.")
     if any(file is None for file in uploaded_files):
         raise ValueError("Debes cargar las tres imágenes antes de evaluar.")
+
+    size_limit_mb = MAX_IMAGE_SIZE_BYTES // (1024 * 1024)
+    for index, uploaded_file in enumerate(uploaded_files, start=1):
+        image_bytes = uploaded_file.getvalue()
+        if not image_bytes:
+            raise ValueError(f"La Imagen {index} no contiene datos.")
+        if len(image_bytes) > MAX_IMAGE_SIZE_BYTES:
+            raise ValueError(f"La Imagen {index} supera el límite de {size_limit_mb} MB.")
     return cleaned_text
 
 
@@ -215,13 +252,222 @@ def render_image_results(fid_results: dict[str, float], clip_results: dict[str, 
     )
 
 
+def render_storage_banner(storage_status: StorageStatus) -> None:
+    if storage_status.available:
+        st.caption(storage_status.message)
+    else:
+        st.warning(storage_status.message)
+
+
+def get_write_access_status(write_password: str | None) -> WriteAccessStatus:
+    if not write_password:
+        return WriteAccessStatus(
+            configured=False,
+            unlocked=False,
+            can_write=False,
+            message="Guardado protegido: configura STORAGE_WRITE_PASSWORD para habilitar escritura en la base.",
+        )
+
+    unlocked = bool(st.session_state.get("write_access_granted", False))
+    if unlocked:
+        return WriteAccessStatus(
+            configured=True,
+            unlocked=True,
+            can_write=True,
+            message="Guardado habilitado en esta sesión.",
+        )
+
+    return WriteAccessStatus(
+        configured=True,
+        unlocked=False,
+        can_write=False,
+        message="Ingresa la contraseña de escritura en la barra lateral para guardar resultados.",
+    )
+
+
+def render_write_access_panel(write_password: str | None, write_access_status: WriteAccessStatus) -> None:
+    with st.sidebar:
+        st.subheader("Acceso de escritura")
+        st.caption("La app puede ser pública, pero el guardado en la base requiere esta contraseña.")
+
+        if not write_password:
+            st.warning(write_access_status.message)
+            return
+
+        if write_access_status.unlocked:
+            st.success(write_access_status.message)
+            if st.button("Bloquear guardado", use_container_width=True):
+                st.session_state["write_access_granted"] = False
+                st.rerun()
+            return
+
+        password_input = st.text_input(
+            "Contraseña para guardar",
+            type="password",
+            key="storage_write_password_input",
+        )
+        if st.button("Habilitar guardado", use_container_width=True):
+            if hmac.compare_digest(password_input, write_password):
+                st.session_state["write_access_granted"] = True
+                st.session_state["storage_write_password_input"] = ""
+                st.rerun()
+
+            st.session_state["write_access_granted"] = False
+            st.error("Contraseña incorrecta. El guardado sigue bloqueado.")
+
+        st.info(write_access_status.message)
+
+
+def persist_text_results(
+    storage_status: StorageStatus,
+    write_access_status: WriteAccessStatus,
+    source_text: str,
+    results: list[dict[str, object]],
+) -> None:
+    if not storage_status.available:
+        return
+    if not write_access_status.can_write:
+        st.info("Los resultados de texto no se guardaron. Habilita el guardado con la contraseña de escritura.")
+        return
+
+    try:
+        save_text_evaluation(source_text, results)
+        st.caption("La evaluación de texto se guardó en el historial.")
+    except Exception as exc:
+        st.warning("La evaluación de texto se calculó, pero no se pudo guardar en la base de datos.")
+        st.caption(f"Detalle técnico: {exc}")
+
+
+def persist_image_results(
+    storage_status: StorageStatus,
+    write_access_status: WriteAccessStatus,
+    prompt_text: str,
+    uploaded_files: list,
+    fid_results: dict[str, float],
+    clip_results: dict[str, float],
+) -> None:
+    if not storage_status.available:
+        return
+    if not write_access_status.can_write:
+        st.info("Los resultados de imágenes no se guardaron. Habilita el guardado con la contraseña de escritura.")
+        return
+
+    try:
+        save_image_evaluation(prompt_text, uploaded_files, fid_results, clip_results)
+        st.caption("La evaluación de imágenes se guardó en el historial.")
+    except Exception as exc:
+        st.warning("La evaluación de imágenes se calculó, pero no se pudo guardar en la base de datos.")
+        st.caption(f"Detalle técnico: {exc}")
+
+
+def render_text_history(history: list[dict[str, object]]) -> None:
+    st.subheader("Historial de texto")
+    if not history:
+        st.info("Todavía no hay evaluaciones de texto guardadas.")
+        return
+
+    for evaluation in history:
+        created_at = format_timestamp(evaluation["created_at"])
+        with st.expander(f"Evaluación de texto · {created_at}"):
+            st.text_area(
+                "Fuente",
+                value=str(evaluation["source_text"]),
+                height=140,
+                disabled=True,
+                key=f"text_source_{evaluation['id']}",
+            )
+            for candidate in evaluation["candidates"]:
+                with st.container(border=True):
+                    st.markdown(f"**{candidate['label']}**")
+                    st.text_area(
+                        candidate["label"],
+                        value=str(candidate["candidate_text"]),
+                        height=120,
+                        disabled=True,
+                        key=f"text_candidate_{evaluation['id']}_{candidate['slot']}",
+                    )
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("BLEU", format_metric(float(candidate["bleu_score"])))
+                    col2.metric("BERTScore Precision", format_metric(float(candidate["bert_precision"])))
+                    col3.metric("BERTScore Recall", format_metric(float(candidate["bert_recall"])))
+                    col4.metric("BERTScore F1", format_metric(float(candidate["bert_f1"])))
+
+
+def render_image_history(history: list[dict[str, object]]) -> None:
+    st.subheader("Historial de imágenes")
+    if not history:
+        st.info("Todavía no hay evaluaciones de imágenes guardadas.")
+        return
+
+    for evaluation in history:
+        created_at = format_timestamp(evaluation["created_at"])
+        with st.expander(f"Evaluación de imágenes · {created_at}"):
+            st.text_area(
+                "Texto de comparación",
+                value=str(evaluation["prompt_text"]),
+                height=100,
+                disabled=True,
+                key=f"image_prompt_{evaluation['id']}",
+            )
+
+            st.markdown("**Resultados FID**")
+            fid_col1, fid_col2, fid_col3 = st.columns(3)
+            fid_col1.metric("FID Imagen 1 vs Imágenes 2 y 3", format_metric(float(evaluation["fid_1_vs_23"])))
+            fid_col2.metric("FID Imagen 2 vs Imágenes 1 y 3", format_metric(float(evaluation["fid_2_vs_13"])))
+            fid_col3.metric("FID Imagen 3 vs Imágenes 1 y 2", format_metric(float(evaluation["fid_3_vs_12"])))
+
+            st.markdown("**Resultados CLIPScore**")
+            clip_col1, clip_col2, clip_col3 = st.columns(3)
+            clip_col1.metric("CLIPScore Imagen 1 vs Texto", format_metric(float(evaluation["clip_1"])))
+            clip_col2.metric("CLIPScore Imagen 2 vs Texto", format_metric(float(evaluation["clip_2"])))
+            clip_col3.metric("CLIPScore Imagen 3 vs Texto", format_metric(float(evaluation["clip_3"])))
+
+            image_columns = st.columns(3)
+            for column, asset in zip(image_columns, evaluation["assets"]):
+                with column:
+                    st.markdown(f"**Imagen {asset['slot']}**")
+                    st.caption(asset["filename"])
+                    st.caption(f"SHA256: {asset['sha256']}")
+                    try:
+                        preview = Image.open(io.BytesIO(asset["image_bytes"]))
+                        preview.load()
+                        st.image(preview, use_container_width=True)
+                    except Exception:
+                        st.warning(f"No se pudo reconstruir la Imagen {asset['slot']} guardada.")
+
+
+def render_history_tab(storage_status: StorageStatus) -> None:
+    st.subheader("Historial")
+    if not storage_status.available:
+        st.info("El historial requiere una base PostgreSQL configurada mediante DATABASE_URL.")
+        return
+
+    st.caption(f"Mostrando las {HISTORY_LIMIT} evaluaciones más recientes de cada módulo.")
+
+    try:
+        text_history = list_recent_text_evaluations(limit=HISTORY_LIMIT)
+        image_history = list_recent_image_evaluations(limit=HISTORY_LIMIT)
+    except Exception as exc:
+        st.error(f"No se pudo cargar el historial: {exc}")
+        return
+
+    render_text_history(text_history)
+    st.divider()
+    render_image_history(image_history)
+
+
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, page_icon="🧪", layout="wide")
 
     st.title(APP_TITLE)
     st.caption("Aplicación académica para evaluación multimodal con métricas de texto e imagen.")
+    storage_status = get_storage_status()
+    write_password = resolve_write_password()
+    write_access_status = get_write_access_status(write_password)
+    render_storage_banner(storage_status)
+    render_write_access_panel(write_password, write_access_status)
 
-    text_tab, image_tab = st.tabs(["Evaluación de texto", "Evaluación de imágenes"])
+    text_tab, image_tab, history_tab = st.tabs(["Evaluación de texto", "Evaluación de imágenes", "Historial"])
 
     with text_tab:
         st.subheader("Módulo de texto")
@@ -264,12 +510,14 @@ def main() -> None:
                         text_results.append(
                             {
                                 "label": label,
+                                "candidate_text": candidate,
                                 "bleu_score": bleu_score,
                                 "bert_results": bert_results,
                             }
                         )
 
                 render_text_results(text_results)
+                persist_text_results(storage_status, write_access_status, reference_text, text_results)
             except Exception as exc:
                 st.error(str(exc))
 
@@ -313,8 +561,19 @@ def main() -> None:
                     }
 
                 render_image_results(fid_results, clip_results)
+                persist_image_results(
+                    storage_status,
+                    write_access_status,
+                    cleaned_text,
+                    uploaded_files,
+                    fid_results,
+                    clip_results,
+                )
             except Exception as exc:
                 st.error(str(exc))
+
+    with history_tab:
+        render_history_tab(storage_status)
 
 
 if __name__ == "__main__":

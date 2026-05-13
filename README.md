@@ -105,7 +105,10 @@ Dependencias complementarias relevantes:
 
 ```text
 historical_evaluator/
+├── .streamlit/
+│   └── secrets.toml.example
 ├── app.py
+├── storage.py
 ├── requirements.txt
 └── README.md
 ```
@@ -115,6 +118,59 @@ historical_evaluator/
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
+```
+
+## Persistencia en PostgreSQL (GCP / Streamlit Cloud)
+
+La app soporta persistencia opcional en PostgreSQL mediante `DATABASE_URL`.
+
+Si `DATABASE_URL` no está configurada:
+
+- la app sigue evaluando texto e imagen
+- no guarda historial
+- muestra una advertencia indicando que la persistencia está desactivada
+
+Si `DATABASE_URL` está configurada:
+
+- crea las tablas necesarias automáticamente en el arranque
+- guarda evaluaciones de texto
+- guarda evaluaciones de imágenes
+- habilita el tab `Historial`
+- exige una contraseña de escritura si configuras `STORAGE_WRITE_PASSWORD`
+
+### Secretos esperados
+
+Puedes configurarlos en `.streamlit/secrets.toml` en local o en `Secrets` dentro de Streamlit Community Cloud.
+
+Ejemplo:
+
+```toml
+DATABASE_URL = "postgresql+psycopg://historical_app:TU_PASSWORD@TU_HOST:5432/historical_validator?sslmode=require"
+DB_SSLMODE = "require"
+STORAGE_WRITE_PASSWORD = "CAMBIA_ESTA_CLAVE"
+```
+
+Notas:
+
+- `DB_SSLMODE` es opcional si ya lo incluyes dentro de `DATABASE_URL`
+- para GCP Cloud SQL con acceso público, lo esperado en esta app es `sslmode=require`
+- las imágenes se almacenan en PostgreSQL como binario (`BYTEA`) en esta v1
+- si defines `STORAGE_WRITE_PASSWORD`, la app solo guardará datos cuando el usuario la ingrese correctamente en la barra lateral
+
+### Ejemplo para Streamlit Cloud
+
+```toml
+DATABASE_URL = "postgresql+psycopg://appuser:TU_PASSWORD@35.188.91.134:5432/appdb?sslmode=require"
+DB_SSLMODE = "require"
+STORAGE_WRITE_PASSWORD = "CAMBIA_POR_UNA_CLAVE_SEGURA"
+```
+
+### Ejemplo local con Cloud SQL Proxy
+
+```toml
+DATABASE_URL = "postgresql+psycopg://appuser:TU_PASSWORD@127.0.0.1:5432/appdb?sslmode=disable"
+DB_SSLMODE = "disable"
+STORAGE_WRITE_PASSWORD = "CAMBIA_POR_UNA_CLAVE_SEGURA"
 ```
 
 ## Consideraciones de uso
