@@ -301,15 +301,16 @@ def render_write_access_panel(write_password: str | None, write_access_status: W
                 st.rerun()
             return
 
-        password_input = st.text_input(
-            "Contraseña para guardar",
-            type="password",
-            key="storage_write_password_input",
-        )
-        if st.button("Habilitar guardado", use_container_width=True):
+        with st.form("write_access_form", clear_on_submit=True):
+            password_input = st.text_input(
+                "Contraseña para guardar",
+                type="password",
+            )
+            submitted = st.form_submit_button("Habilitar guardado", use_container_width=True)
+
+        if submitted:
             if hmac.compare_digest(password_input, write_password):
                 st.session_state["write_access_granted"] = True
-                st.session_state["storage_write_password_input"] = ""
                 st.rerun()
 
             st.session_state["write_access_granted"] = False
