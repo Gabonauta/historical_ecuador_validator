@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import uuid
@@ -130,6 +131,35 @@ def resolve_write_password() -> str | None:
     return _get_secret_value("STORAGE_WRITE_PASSWORD") or os.getenv("STORAGE_WRITE_PASSWORD")
 
 
+def serialize_image_prompt_texts(prompt_texts: dict[int, str]) -> str:
+    return json.dumps(
+        {
+            "version": 2,
+            "clip_texts": {str(slot): text for slot, text in sorted(prompt_texts.items())},
+        },
+        ensure_ascii=False,
+    )
+
+
+def deserialize_image_prompt_texts(raw_prompt_text: str) -> dict[int, str]:
+    try:
+        payload = json.loads(raw_prompt_text)
+    except json.JSONDecodeError:
+        return {1: raw_prompt_text}
+
+    clip_texts = payload.get("clip_texts")
+    if not isinstance(clip_texts, dict):
+        return {1: raw_prompt_text}
+
+    parsed: dict[int, str] = {}
+    for slot, value in clip_texts.items():
+        try:
+            parsed[int(slot)] = str(value)
+        except (TypeError, ValueError):
+            continue
+    return parsed or {1: raw_prompt_text}
+
+
 @lru_cache(maxsize=4)
 def get_engine(database_url: str) -> Engine:
     return create_engine(database_url, pool_pre_ping=True)
@@ -183,6 +213,8 @@ def _prepare_image_payloads(uploaded_files: list[Any]) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
 
     for slot, uploaded_file in enumerate(uploaded_files, start=1):
+        if uploaded_file is None:
+            continue
         image_bytes = uploaded_file.getvalue()
         if not image_bytes:
             raise ValueError(f"La Imagen {slot} no contiene datos.")
@@ -234,7 +266,7 @@ def save_text_evaluation(source_text: str, text_results: list[dict[str, Any]]) -
 
 
 def save_image_evaluation(
-    prompt_text: str,
+    prompt_texts: dict[int, str],
     uploaded_files: list[Any],
     fid_results: dict[str, float],
     clip_results: dict[str, float],
@@ -245,7 +277,7 @@ def save_image_evaluation(
 
     with session_factory.begin() as session:
         evaluation = ImageEvaluation(
-            prompt_text=prompt_text,
+            prompt_text=serialize_image_prompt_texts(prompt_texts),
             fid_1_vs_23=float(fid_results["fid_1_vs_23"]),
             fid_2_vs_13=float(fid_results["fid_2_vs_13"]),
             fid_3_vs_12=float(fid_results["fid_3_vs_12"]),
@@ -324,6 +356,7 @@ def list_recent_image_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, 
             "id": str(evaluation.id),
             "created_at": evaluation.created_at,
             "prompt_text": evaluation.prompt_text,
+            "prompt_texts": deserialize_image_prompt_texts(evaluation.prompt_text),
             "fid_1_vs_23": evaluation.fid_1_vs_23,
             "fid_2_vs_13": evaluation.fid_2_vs_13,
             "fid_3_vs_12": evaluation.fid_3_vs_12,

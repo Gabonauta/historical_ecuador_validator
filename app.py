@@ -112,17 +112,36 @@ def resize_for_fid(image: Image.Image) -> Image.Image:
     return image.resize(FID_IMAGE_SIZE, Image.Resampling.BICUBIC)
 
 
+def image_to_fid_tensor(image: Image.Image) -> torch.Tensor:
+    return pil_to_tensor(resize_for_fid(image))
+
+
 def prepare_fid_batch(images: list[Image.Image], device: torch.device) -> torch.Tensor:
-    tensors = [pil_to_tensor(resize_for_fid(image)) for image in images]
+    tensors = [image_to_fid_tensor(image) for image in images]
     return torch.stack(tensors, dim=0).to(device)
+
+
+def prepare_single_image_fid_approx_batch(image: Image.Image, device: torch.device) -> torch.Tensor:
+    """Approximate a one-image distribution with two deterministic views."""
+    base_tensor = image_to_fid_tensor(image)
+    augmented_tensor = torch.flip(base_tensor, dims=[2])
+
+    if torch.equal(augmented_tensor, base_tensor):
+        augmented_tensor = torch.roll(base_tensor, shifts=1, dims=2)
+
+    if torch.equal(augmented_tensor, base_tensor):
+        augmented_tensor = base_tensor.clone()
+        augmented_tensor[0, 0, 0] = 255 - int(augmented_tensor[0, 0, 0].item())
+
+    return torch.stack([base_tensor, augmented_tensor], dim=0).to(device)
 
 
 def compute_fid_single_vs_group(target_image: Image.Image, reference_images: list[Image.Image]) -> float:
     """Compute FID for one image against a reference group."""
     if target_image is None:
         raise ValueError("La imagen objetivo no es válida.")
-    if len(reference_images) != 2:
-        raise ValueError("FID requiere exactamente dos imágenes de referencia para este módulo.")
+    if len(reference_images) < 2:
+        raise ValueError("FID requiere al menos dos imágenes de referencia para este módulo.")
 
     try:
         metric = FrechetInceptionDistance(feature=64, normalize=False).to(DEVICE)
@@ -133,7 +152,7 @@ def compute_fid_single_vs_group(target_image: Image.Image, reference_images: lis
 
     metric = metric.set_dtype(torch.float64)
 
-    target_batch = prepare_fid_batch([target_image], DEVICE)
+    target_batch = prepare_single_image_fid_approx_batch(target_image, DEVICE)
     reference_batch = prepare_fid_batch(reference_images, DEVICE)
 
     with torch.inference_mode():
@@ -195,21 +214,27 @@ def validate_text_inputs(source_text: str, candidate_texts: list[str]) -> tuple[
     return cleaned_source, cleaned_candidates
 
 
-def validate_image_inputs(text: str, uploaded_files: list) -> str:
-    cleaned_text = text.strip()
-    if not cleaned_text:
-        raise ValueError("Debes ingresar el texto para comparar con las imágenes.")
-    if any(file is None for file in uploaded_files):
-        raise ValueError("Debes cargar las tres imágenes antes de evaluar.")
+def validate_image_inputs(texts: list[str], uploaded_files: list) -> list[str]:
+    if any(file is None for file in uploaded_files[:3]):
+        raise ValueError("Debes cargar las imágenes 1, 2 y 3 antes de evaluar.")
+
+    cleaned_texts: list[str] = []
+    for index, text in enumerate(texts, start=1):
+        cleaned_text = text.strip()
+        if not cleaned_text:
+            raise ValueError(f"Debes ingresar el texto para comparar con la Imagen {index}.")
+        cleaned_texts.append(cleaned_text)
 
     size_limit_mb = MAX_IMAGE_SIZE_BYTES // (1024 * 1024)
     for index, uploaded_file in enumerate(uploaded_files, start=1):
+        if uploaded_file is None:
+            continue
         image_bytes = uploaded_file.getvalue()
         if not image_bytes:
             raise ValueError(f"La Imagen {index} no contiene datos.")
         if len(image_bytes) > MAX_IMAGE_SIZE_BYTES:
             raise ValueError(f"La Imagen {index} supera el límite de {size_limit_mb} MB.")
-    return cleaned_text
+    return cleaned_texts
 
 
 def render_text_results(results: list[dict[str, object]]) -> None:
@@ -236,9 +261,9 @@ def render_image_results(fid_results: dict[str, float], clip_results: dict[str, 
 
     st.subheader("Resultados FID")
     fid_col1, fid_col2, fid_col3 = st.columns(3)
-    fid_col1.metric("FID Imagen 1 vs Imágenes 2 y 3", format_metric(fid_results["fid_1_vs_23"]))
-    fid_col2.metric("FID Imagen 2 vs Imágenes 1 y 3", format_metric(fid_results["fid_2_vs_13"]))
-    fid_col3.metric("FID Imagen 3 vs Imágenes 1 y 2", format_metric(fid_results["fid_3_vs_12"]))
+    fid_col1.metric("FID Imagen 1 vs referencia", format_metric(fid_results["fid_1_vs_23"]))
+    fid_col2.metric("FID Imagen 2 vs referencia", format_metric(fid_results["fid_2_vs_13"]))
+    fid_col3.metric("FID Imagen 3 vs referencia", format_metric(fid_results["fid_3_vs_12"]))
 
     st.subheader("Resultados CLIPScore")
     clip_col1, clip_col2, clip_col3 = st.columns(3)
@@ -342,7 +367,7 @@ def persist_text_results(
 def persist_image_results(
     storage_status: StorageStatus,
     write_access_status: WriteAccessStatus,
-    prompt_text: str,
+    prompt_texts: dict[int, str],
     uploaded_files: list,
     fid_results: dict[str, float],
     clip_results: dict[str, float],
@@ -354,7 +379,7 @@ def persist_image_results(
         return
 
     try:
-        save_image_evaluation(prompt_text, uploaded_files, fid_results, clip_results)
+        save_image_evaluation(prompt_texts, uploaded_files, fid_results, clip_results)
         st.caption("La evaluación de imágenes se guardó en el historial.")
     except Exception as exc:
         st.warning("La evaluación de imágenes se calculó, pero no se pudo guardar en la base de datos.")
@@ -403,19 +428,23 @@ def render_image_history(history: list[dict[str, object]]) -> None:
     for evaluation in history:
         created_at = format_timestamp(evaluation["created_at"])
         with st.expander(f"Evaluación de imágenes · {created_at}"):
-            st.text_area(
-                "Texto de comparación",
-                value=str(evaluation["prompt_text"]),
-                height=100,
-                disabled=True,
-                key=f"image_prompt_{evaluation['id']}",
-            )
+            prompt_texts = evaluation.get("prompt_texts", {})
+            prompt_columns = st.columns(3)
+            for slot in range(1, 4):
+                with prompt_columns[slot - 1]:
+                    st.text_area(
+                        f"Texto Imagen {slot}",
+                        value=str(prompt_texts.get(slot, "")),
+                        height=120,
+                        disabled=True,
+                        key=f"image_prompt_{evaluation['id']}_{slot}",
+                    )
 
             st.markdown("**Resultados FID**")
             fid_col1, fid_col2, fid_col3 = st.columns(3)
-            fid_col1.metric("FID Imagen 1 vs Imágenes 2 y 3", format_metric(float(evaluation["fid_1_vs_23"])))
-            fid_col2.metric("FID Imagen 2 vs Imágenes 1 y 3", format_metric(float(evaluation["fid_2_vs_13"])))
-            fid_col3.metric("FID Imagen 3 vs Imágenes 1 y 2", format_metric(float(evaluation["fid_3_vs_12"])))
+            fid_col1.metric("FID Imagen 1 vs referencia", format_metric(float(evaluation["fid_1_vs_23"])))
+            fid_col2.metric("FID Imagen 2 vs referencia", format_metric(float(evaluation["fid_2_vs_13"])))
+            fid_col3.metric("FID Imagen 3 vs referencia", format_metric(float(evaluation["fid_3_vs_12"])))
 
             st.markdown("**Resultados CLIPScore**")
             clip_col1, clip_col2, clip_col3 = st.columns(3)
@@ -423,7 +452,7 @@ def render_image_history(history: list[dict[str, object]]) -> None:
             clip_col2.metric("CLIPScore Imagen 2 vs Texto", format_metric(float(evaluation["clip_2"])))
             clip_col3.metric("CLIPScore Imagen 3 vs Texto", format_metric(float(evaluation["clip_3"])))
 
-            image_columns = st.columns(3)
+            image_columns = st.columns(4)
             for column, asset in zip(image_columns, evaluation["assets"]):
                 with column:
                     st.markdown(f"**Imagen {asset['slot']}**")
@@ -525,47 +554,78 @@ def main() -> None:
     with image_tab:
         st.subheader("Módulo de imágenes")
         st.warning(
-            "FID con solo 3 imágenes es una aproximación exploratoria y no una evaluación "
+            "FID con tan pocas imágenes es una aproximación exploratoria y no una evaluación "
             "estadísticamente robusta"
+        )
+        st.caption(
+            "La Imagen 4 es opcional y se usa como referencia adicional en FID. "
+            "Para evitar fallos numéricos con un solo target, la app aproxima la distribución "
+            "de cada imagen objetivo con una segunda vista determinística."
         )
 
         with st.form("image_evaluation_form"):
-            image_text = st.text_input(
-                "Texto para comparar con las imágenes",
-                placeholder="Describe lo que deberían representar las imágenes.",
-            )
-            col1, col2, col3 = st.columns(3)
+            text_col1, text_col2, text_col3 = st.columns(3)
+            with text_col1:
+                image_text_1 = st.text_area(
+                    "Texto para Imagen 1",
+                    height=120,
+                    placeholder="Describe lo que debería representar la Imagen 1.",
+                )
+            with text_col2:
+                image_text_2 = st.text_area(
+                    "Texto para Imagen 2",
+                    height=120,
+                    placeholder="Describe lo que debería representar la Imagen 2.",
+                )
+            with text_col3:
+                image_text_3 = st.text_area(
+                    "Texto para Imagen 3",
+                    height=120,
+                    placeholder="Describe lo que debería representar la Imagen 3.",
+                )
+
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 image_1_file = st.file_uploader("Imagen 1", type=["png", "jpg", "jpeg"])
             with col2:
                 image_2_file = st.file_uploader("Imagen 2", type=["png", "jpg", "jpeg"])
             with col3:
                 image_3_file = st.file_uploader("Imagen 3", type=["png", "jpg", "jpeg"])
+            with col4:
+                image_4_file = st.file_uploader("Imagen 4 (referencia opcional)", type=["png", "jpg", "jpeg"])
             evaluate_images = st.form_submit_button("Evaluar imágenes", use_container_width=True)
 
         if evaluate_images:
-            uploaded_files = [image_1_file, image_2_file, image_3_file]
+            uploaded_files = [image_1_file, image_2_file, image_3_file, image_4_file]
             try:
-                cleaned_text = validate_image_inputs(image_text, uploaded_files)
-                images = [load_image(file) for file in uploaded_files]
+                cleaned_texts = validate_image_inputs(
+                    [image_text_1, image_text_2, image_text_3],
+                    uploaded_files,
+                )
+                images = [load_image(file) if file is not None else None for file in uploaded_files]
+                reference_sets = {
+                    "fid_1_vs_23": [images[1], images[2]] + ([images[3]] if images[3] is not None else []),
+                    "fid_2_vs_13": [images[0], images[2]] + ([images[3]] if images[3] is not None else []),
+                    "fid_3_vs_12": [images[0], images[1]] + ([images[3]] if images[3] is not None else []),
+                }
 
                 with st.spinner("Procesando evaluación de imágenes..."):
                     fid_results = {
-                        "fid_1_vs_23": compute_fid_single_vs_group(images[0], [images[1], images[2]]),
-                        "fid_2_vs_13": compute_fid_single_vs_group(images[1], [images[0], images[2]]),
-                        "fid_3_vs_12": compute_fid_single_vs_group(images[2], [images[0], images[1]]),
+                        "fid_1_vs_23": compute_fid_single_vs_group(images[0], reference_sets["fid_1_vs_23"]),
+                        "fid_2_vs_13": compute_fid_single_vs_group(images[1], reference_sets["fid_2_vs_13"]),
+                        "fid_3_vs_12": compute_fid_single_vs_group(images[2], reference_sets["fid_3_vs_12"]),
                     }
                     clip_results = {
-                        "clip_1": compute_clipscore(images[0], cleaned_text),
-                        "clip_2": compute_clipscore(images[1], cleaned_text),
-                        "clip_3": compute_clipscore(images[2], cleaned_text),
+                        "clip_1": compute_clipscore(images[0], cleaned_texts[0]),
+                        "clip_2": compute_clipscore(images[1], cleaned_texts[1]),
+                        "clip_3": compute_clipscore(images[2], cleaned_texts[2]),
                     }
 
                 render_image_results(fid_results, clip_results)
                 persist_image_results(
                     storage_status,
                     write_access_status,
-                    cleaned_text,
+                    {1: cleaned_texts[0], 2: cleaned_texts[1], 3: cleaned_texts[2]},
                     uploaded_files,
                     fid_results,
                     clip_results,
