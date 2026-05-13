@@ -14,6 +14,7 @@ from PIL import Image, UnidentifiedImageError
 from sacrebleu.metrics import BLEU
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.multimodal.clip_score import CLIPScore
+from transformers import CLIPModel, CLIPProcessor
 from torchvision.transforms import functional as TF
 
 from storage import (
@@ -172,6 +173,43 @@ def get_clip_metric(device_name: str) -> CLIPScore:
     return metric.to(device_name)
 
 
+@st.cache_resource(show_spinner=False)
+def get_clip_components(device_name: str) -> tuple[CLIPModel, CLIPProcessor]:
+    model = CLIPModel.from_pretrained(CLIP_MODEL_NAME).to(device_name)
+    processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME)
+    return model, processor
+
+
+def _coerce_clip_features(features: object) -> torch.Tensor:
+    if isinstance(features, torch.Tensor):
+        return features
+    if hasattr(features, "pooler_output") and getattr(features, "pooler_output") is not None:
+        return getattr(features, "pooler_output")
+    if hasattr(features, "last_hidden_state") and getattr(features, "last_hidden_state") is not None:
+        return getattr(features, "last_hidden_state")[:, 0, :]
+    raise TypeError(f"No se pudieron extraer embeddings CLIP desde {type(features).__name__}.")
+
+
+def compute_clipscore_compat(image: Image.Image, text: str) -> float:
+    model, processor = get_clip_components(str(DEVICE))
+
+    image_inputs = processor(images=[image], return_tensors="pt", padding=True)
+    text_inputs = processor(text=[text], return_tensors="pt", padding=True)
+
+    with torch.inference_mode():
+        image_features = _coerce_clip_features(model.get_image_features(image_inputs["pixel_values"].to(DEVICE)))
+        text_features = _coerce_clip_features(
+            model.get_text_features(
+                text_inputs["input_ids"].to(DEVICE),
+                text_inputs["attention_mask"].to(DEVICE),
+            )
+        )
+
+        image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
+        return float((100 * (image_features * text_features).sum(dim=-1)).detach().cpu().item())
+
+
 def compute_clipscore(image: Image.Image, text: str) -> float:
     """Compute CLIPScore between one image and one text."""
     cleaned_text = text.strip()
@@ -182,9 +220,15 @@ def compute_clipscore(image: Image.Image, text: str) -> float:
     image_tensor = pil_to_tensor(image).to(DEVICE)
 
     with torch.inference_mode():
-        metric.reset()
-        clip_value = float(metric(image_tensor, cleaned_text).detach().cpu().item())
-        metric.reset()
+        try:
+            metric.reset()
+            clip_value = float(metric(image_tensor, cleaned_text).detach().cpu().item())
+            metric.reset()
+        except AttributeError as exc:
+            metric.reset()
+            if "norm" not in str(exc):
+                raise
+            clip_value = compute_clipscore_compat(image, cleaned_text)
 
     return clip_value
 
