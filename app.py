@@ -5,7 +5,7 @@ import io
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final
+from typing import Any, Final
 
 import streamlit as st
 import torch
@@ -26,7 +26,9 @@ from storage import (
     list_recent_text_evaluations,
     resolve_write_password,
     save_image_evaluation,
+    save_image_expert_review,
     save_text_evaluation,
+    save_text_expert_review,
 )
 
 
@@ -35,6 +37,47 @@ BERTSCORE_MODEL_NAME: Final[str] = "bert-base-multilingual-cased"
 CLIP_MODEL_NAME: Final[str] = "openai/clip-vit-base-patch32"
 FID_IMAGE_SIZE: Final[tuple[int, int]] = (299, 299)
 DEVICE: Final[torch.device] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SCORE_OPTIONS: Final[list[int]] = [1, 2, 3, 4, 5]
+SCORE_CAPTIONS: Final[list[str]] = [
+    "Muy deficiente",
+    "Deficiente",
+    "Aceptable",
+    "Bueno",
+    "Excelente",
+]
+SCORE_LABELS: Final[dict[int, str]] = dict(zip(SCORE_OPTIONS, SCORE_CAPTIONS))
+
+TEXT_EXPERT_CRITERIA: Final[list[tuple[str, str, str]]] = [
+    ("fidelidad_factual", "Fidelidad factual", "Conserva hechos, relaciones y atributos de la fuente sin errores."),
+    ("conservacion_semantica", "Conservación semántica", "Mantiene el sentido general de la fuente aunque reformule."),
+    ("rigor_historico", "Rigor histórico", "Usa un tratamiento compatible con contenido histórico y documental."),
+    ("coherencia_claridad", "Coherencia y claridad", "El texto es comprensible, bien articulado y no se contradice."),
+    ("ausencia_alucinaciones", "Ausencia de alucinaciones", "No introduce datos no sustentados por la fuente."),
+    ("ausencia_anacronismos", "Ausencia de anacronismos", "Evita conceptos o enfoques impropios del contexto histórico."),
+    ("adecuacion_comunicativa", "Adecuación comunicativa", "Resulta útil para fines académicos, educativos o divulgativos."),
+]
+
+IMAGE_EXPERT_CRITERIA: Final[list[tuple[str, str, str]]] = [
+    ("correspondencia_texto", "Correspondencia con el texto", "La imagen refleja adecuadamente la descripción textual."),
+    ("plausibilidad_historica", "Plausibilidad histórica", "La representación es verosímil para el contexto ecuatoriano."),
+    ("coherencia_iconografica", "Coherencia iconográfica", "Los elementos visuales guardan relación entre sí."),
+    ("adecuacion_contextual", "Adecuación contextual", "La escena o figura se ubica bien en su contexto cultural o histórico."),
+    ("ausencia_anacronismos", "Ausencia de anacronismos visuales", "No aparecen objetos o estilos impropios del periodo tratado."),
+    ("calidad_visual_funcional", "Calidad visual funcional", "La imagen es legible y útil para análisis o divulgación."),
+    ("utilidad_divulgativa", "Utilidad educativa o divulgativa", "La imagen sería útil para explicar o comunicar el tema."),
+]
+
+TEXT_SUMMARY_QUESTIONS: Final[list[tuple[str, str]]] = [
+    ("best_represents_source", "¿Cuál texto representa mejor la fuente histórica?"),
+    ("clearest_for_dissemination", "¿Cuál texto es más claro para divulgación o docencia?"),
+    ("highest_risk_error", "¿Cuál texto presenta mayor riesgo de error histórico?"),
+]
+
+IMAGE_SUMMARY_QUESTIONS: Final[list[tuple[str, str]]] = [
+    ("best_historical_representation", "¿Cuál imagen representa mejor el contenido histórico solicitado?"),
+    ("best_context_fit", "¿Cuál imagen tiene mejor adecuación visual al contexto ecuatoriano?"),
+    ("highest_anachronism_risk", "¿Cuál imagen presenta mayor riesgo de anacronismo o error visual?"),
+]
 
 
 @dataclass(frozen=True)
@@ -250,6 +293,26 @@ def format_timestamp(value: datetime | None) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
 
 
+def pop_flash_message(key: str) -> str | None:
+    message = st.session_state.get(key)
+    if message:
+        st.session_state.pop(key, None)
+        return str(message)
+    return None
+
+
+def scale_markdown() -> str:
+    return (
+        "| Puntaje | Significado |\n"
+        "|---|---|\n"
+        "| 1 | Muy deficiente |\n"
+        "| 2 | Deficiente |\n"
+        "| 3 | Aceptable |\n"
+        "| 4 | Bueno |\n"
+        "| 5 | Excelente |"
+    )
+
+
 def validate_text_inputs(source_text: str, candidate_texts: list[str]) -> tuple[str, list[tuple[str, str]]]:
     cleaned_source = source_text.strip()
     if not cleaned_source:
@@ -286,6 +349,19 @@ def validate_image_inputs(texts: list[str], uploaded_files: list) -> list[str]:
         if len(image_bytes) > MAX_IMAGE_SIZE_BYTES:
             raise ValueError(f"La Imagen {index} supera el límite de {size_limit_mb} MB.")
     return cleaned_texts
+
+
+def validate_required_text(value: str, label: str) -> str:
+    cleaned_value = value.strip()
+    if not cleaned_value:
+        raise ValueError(f"Debes completar el campo '{label}'.")
+    return cleaned_value
+
+
+def validate_score_value(value: int | None, label: str) -> int:
+    if value is None:
+        raise ValueError(f"Debes puntuar '{label}'.")
+    return int(value)
 
 
 def render_text_results(results: list[dict[str, object]]) -> None:
@@ -437,87 +513,499 @@ def persist_image_results(
         st.caption(f"Detalle técnico: {exc}")
 
 
-def render_text_history(history: list[dict[str, object]]) -> None:
+def render_history_stepper(prefix: str, evaluations: list[dict[str, object]]) -> dict[str, object]:
+    """Emulate a stepper with segmented control + prev/next for current Streamlit."""
+    step_labels = [str(index + 1) for index in range(len(evaluations))]
+    selector_key = f"{prefix}_history_stepper"
+
+    if st.session_state.get(selector_key) not in step_labels:
+        st.session_state[selector_key] = step_labels[0]
+
+    current_label = str(st.session_state[selector_key])
+    current_index = step_labels.index(current_label)
+
+    prev_col, center_col, next_col = st.columns([1, 4, 1])
+    with prev_col:
+        if st.button("Anterior", key=f"{selector_key}_prev", disabled=current_index == 0, use_container_width=True):
+            st.session_state[selector_key] = step_labels[current_index - 1]
+            st.rerun()
+    with center_col:
+        selected_label = st.segmented_control(
+            "Stepper",
+            step_labels,
+            default=current_label,
+            key=selector_key,
+            label_visibility="collapsed",
+            width="stretch",
+        )
+    with next_col:
+        if st.button(
+            "Siguiente",
+            key=f"{selector_key}_next",
+            disabled=current_index == len(step_labels) - 1,
+            use_container_width=True,
+        ):
+            st.session_state[selector_key] = step_labels[current_index + 1]
+            st.rerun()
+
+    resolved_label = str(selected_label or step_labels[0])
+    resolved_index = step_labels.index(resolved_label)
+    selected_evaluation = evaluations[resolved_index]
+    st.caption(
+        f"Evaluación {resolved_index + 1} de {len(evaluations)} · "
+        f"{format_timestamp(selected_evaluation['created_at'])}"
+    )
+    return selected_evaluation
+
+
+def render_text_history_snapshot(evaluation: dict[str, object]) -> None:
+    st.text_area(
+        "Fuente",
+        value=str(evaluation["source_text"]),
+        height=140,
+        disabled=True,
+        key=f"text_source_snapshot_{evaluation['id']}",
+    )
+    for candidate in evaluation["candidates"]:
+        with st.container(border=True):
+            st.markdown(f"**{candidate['label']}**")
+            st.text_area(
+                candidate["label"],
+                value=str(candidate["candidate_text"]),
+                height=120,
+                disabled=True,
+                key=f"text_candidate_snapshot_{evaluation['id']}_{candidate['slot']}",
+            )
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("BLEU", format_metric(float(candidate["bleu_score"])))
+            col2.metric("BERTScore Precision", format_metric(float(candidate["bert_precision"])))
+            col3.metric("BERTScore Recall", format_metric(float(candidate["bert_recall"])))
+            col4.metric("BERTScore F1", format_metric(float(candidate["bert_f1"])))
+
+
+def render_image_history_snapshot(evaluation: dict[str, object]) -> None:
+    prompt_texts = evaluation.get("prompt_texts", {})
+    prompt_columns = st.columns(3)
+    for slot in range(1, 4):
+        with prompt_columns[slot - 1]:
+            st.text_area(
+                f"Texto Imagen {slot}",
+                value=str(prompt_texts.get(slot, "")),
+                height=120,
+                disabled=True,
+                key=f"image_prompt_snapshot_{evaluation['id']}_{slot}",
+            )
+
+    st.markdown("**Resultados FID**")
+    fid_col1, fid_col2, fid_col3 = st.columns(3)
+    fid_col1.metric("FID Imagen 1 vs referencia", format_metric(float(evaluation["fid_1_vs_23"])))
+    fid_col2.metric("FID Imagen 2 vs referencia", format_metric(float(evaluation["fid_2_vs_13"])))
+    fid_col3.metric("FID Imagen 3 vs referencia", format_metric(float(evaluation["fid_3_vs_12"])))
+
+    st.markdown("**Resultados CLIPScore**")
+    clip_col1, clip_col2, clip_col3 = st.columns(3)
+    clip_col1.metric("CLIPScore Imagen 1 vs Texto", format_metric(float(evaluation["clip_1"])))
+    clip_col2.metric("CLIPScore Imagen 2 vs Texto", format_metric(float(evaluation["clip_2"])))
+    clip_col3.metric("CLIPScore Imagen 3 vs Texto", format_metric(float(evaluation["clip_3"])))
+
+    image_columns = st.columns(4)
+    for column, asset in zip(image_columns, evaluation["assets"]):
+        with column:
+            st.markdown(f"**Imagen {asset['slot']}**")
+            st.caption(asset["filename"])
+            st.caption(f"SHA256: {asset['sha256']}")
+            try:
+                preview = Image.open(io.BytesIO(asset["image_bytes"]))
+                preview.load()
+                st.image(preview, use_container_width=True)
+            except Exception:
+                st.warning(f"No se pudo reconstruir la Imagen {asset['slot']} guardada.")
+
+
+def render_expert_evaluation_header(form_prefix: str) -> tuple[str, str, str]:
+    with st.container(border=True):
+        st.markdown("#### Instrucciones para la evaluación experta")
+        info_col, evaluator_col = st.columns([1.3, 1.0])
+        with info_col:
+            st.markdown(
+                "1. Revisa la evaluación seleccionada.\n"
+                "2. Puntúa cada criterio usando la escala de 1 a 5.\n"
+                "3. Completa las preguntas comparativas.\n"
+                "4. Añade observaciones solo si hace falta una nota cualitativa adicional."
+            )
+            st.markdown(scale_markdown())
+        with evaluator_col:
+            evaluator_name = st.text_input(
+                "Nombre de la persona evaluadora",
+                key=f"{form_prefix}_evaluator_name",
+                placeholder="Nombre completo",
+            )
+            evaluator_specialty = st.text_input(
+                "Especialidad",
+                key=f"{form_prefix}_evaluator_specialty",
+                placeholder="Historia, archivo, docencia, etc.",
+            )
+            evaluator_institution = st.text_input(
+                "Institución",
+                key=f"{form_prefix}_evaluator_institution",
+                placeholder="Universidad, archivo, museo, etc.",
+            )
+    return evaluator_name, evaluator_specialty, evaluator_institution
+
+
+def render_score_input(label: str, key: str, help_text: str) -> int | None:
+    return st.segmented_control(
+        label,
+        SCORE_OPTIONS,
+        default=None,
+        required=True,
+        key=key,
+        help=help_text,
+        width="stretch",
+    )
+
+
+def render_text_expert_review_form(
+    evaluation: dict[str, object],
+    storage_status: StorageStatus,
+    write_access_status: WriteAccessStatus,
+) -> None:
+    st.markdown("### Nueva evaluación experta de texto")
+    if not write_access_status.can_write:
+        st.info("Habilita el guardado con la contraseña de escritura para registrar una evaluación experta.")
+        return
+
+    form_prefix = f"text_expert_{evaluation['id']}"
+    candidate_labels = [str(candidate["label"]) for candidate in evaluation["candidates"]]
+
+    with st.form(f"{form_prefix}_form", clear_on_submit=True):
+        evaluator_name, evaluator_specialty, evaluator_institution = render_expert_evaluation_header(form_prefix)
+
+        candidate_responses: dict[int, dict[str, int | None]] = {}
+        for candidate in evaluation["candidates"]:
+            slot = int(candidate["slot"])
+            candidate_responses[slot] = {}
+            with st.container(border=True):
+                st.markdown(f"#### {candidate['label']}")
+                for criterion_key, criterion_label, criterion_help in TEXT_EXPERT_CRITERIA:
+                    candidate_responses[slot][criterion_key] = render_score_input(
+                        criterion_label,
+                        key=f"{form_prefix}_candidate_{slot}_{criterion_key}",
+                        help_text=criterion_help,
+                    )
+
+        st.markdown("#### Comparación global")
+        summary_answers: dict[str, str | None] = {}
+        for question_key, question_label in TEXT_SUMMARY_QUESTIONS:
+            summary_answers[question_key] = st.selectbox(
+                question_label,
+                options=candidate_labels,
+                index=None,
+                placeholder="Selecciona una opción",
+                key=f"{form_prefix}_{question_key}",
+            )
+
+        observations = st.text_area(
+            "Observaciones (opcional)",
+            height=140,
+            key=f"{form_prefix}_observations",
+            placeholder="Añade aquí observaciones cualitativas si lo consideras necesario.",
+        )
+        submitted = st.form_submit_button("Enviar evaluación experta de texto", use_container_width=True)
+
+    if not submitted:
+        return
+
+    try:
+        cleaned_name = validate_required_text(evaluator_name, "Nombre de la persona evaluadora")
+        cleaned_specialty = validate_required_text(evaluator_specialty, "Especialidad")
+        cleaned_institution = validate_required_text(evaluator_institution, "Institución")
+
+        validated_candidates: dict[str, dict[str, object]] = {}
+        for candidate in evaluation["candidates"]:
+            slot = int(candidate["slot"])
+            scores: dict[str, int] = {}
+            for criterion_key, criterion_label, _ in TEXT_EXPERT_CRITERIA:
+                scores[criterion_key] = validate_score_value(
+                    candidate_responses[slot][criterion_key],
+                    f"{candidate['label']} · {criterion_label}",
+                )
+            validated_candidates[str(slot)] = {
+                "label": str(candidate["label"]),
+                "scores": scores,
+            }
+
+        validated_summary = {
+            question_key: validate_required_text(str(summary_answers[question_key] or ""), question_label)
+            for question_key, question_label in TEXT_SUMMARY_QUESTIONS
+        }
+
+        responses = {
+            "kind": "text",
+            "scale": SCORE_LABELS,
+            "candidates": validated_candidates,
+            "summary": validated_summary,
+        }
+        cleaned_observations = observations.strip() or None
+        save_text_expert_review(
+            evaluation["id"],
+            cleaned_name,
+            cleaned_specialty,
+            cleaned_institution,
+            responses,
+            observations=cleaned_observations,
+        )
+        st.session_state["text_expert_review_flash"] = "La evaluación experta de texto se guardó correctamente."
+        st.rerun()
+    except Exception as exc:
+        st.error(str(exc))
+
+
+def render_image_expert_review_form(
+    evaluation: dict[str, object],
+    storage_status: StorageStatus,
+    write_access_status: WriteAccessStatus,
+) -> None:
+    st.markdown("### Nueva evaluación experta de imágenes")
+    if not write_access_status.can_write:
+        st.info("Habilita el guardado con la contraseña de escritura para registrar una evaluación experta.")
+        return
+
+    form_prefix = f"image_expert_{evaluation['id']}"
+    image_labels = [f"Imagen {slot}" for slot in range(1, 4)]
+    has_reference_image = any(int(asset["slot"]) == 4 for asset in evaluation["assets"])
+
+    with st.form(f"{form_prefix}_form", clear_on_submit=True):
+        evaluator_name, evaluator_specialty, evaluator_institution = render_expert_evaluation_header(form_prefix)
+
+        image_responses: dict[int, dict[str, int | None]] = {}
+        for slot in range(1, 4):
+            image_responses[slot] = {}
+            with st.container(border=True):
+                st.markdown(f"#### Imagen {slot}")
+                for criterion_key, criterion_label, criterion_help in IMAGE_EXPERT_CRITERIA:
+                    image_responses[slot][criterion_key] = render_score_input(
+                        criterion_label,
+                        key=f"{form_prefix}_image_{slot}_{criterion_key}",
+                        help_text=criterion_help,
+                    )
+
+        reference_score: int | None = None
+        if has_reference_image:
+            st.markdown("#### Imagen 4 de referencia")
+            reference_score = render_score_input(
+                "Pertinencia de la Imagen 4 como referencia adicional",
+                key=f"{form_prefix}_reference_score",
+                help_text="Valora si la cuarta imagen aportó valor como referencia comparativa.",
+            )
+
+        st.markdown("#### Comparación global")
+        summary_answers: dict[str, str | None] = {}
+        for question_key, question_label in IMAGE_SUMMARY_QUESTIONS:
+            summary_answers[question_key] = st.selectbox(
+                question_label,
+                options=image_labels,
+                index=None,
+                placeholder="Selecciona una opción",
+                key=f"{form_prefix}_{question_key}",
+            )
+
+        observations = st.text_area(
+            "Observaciones (opcional)",
+            height=140,
+            key=f"{form_prefix}_observations",
+            placeholder="Añade aquí observaciones cualitativas si lo consideras necesario.",
+        )
+        submitted = st.form_submit_button("Enviar evaluación experta de imágenes", use_container_width=True)
+
+    if not submitted:
+        return
+
+    try:
+        cleaned_name = validate_required_text(evaluator_name, "Nombre de la persona evaluadora")
+        cleaned_specialty = validate_required_text(evaluator_specialty, "Especialidad")
+        cleaned_institution = validate_required_text(evaluator_institution, "Institución")
+
+        validated_images: dict[str, dict[str, object]] = {}
+        for slot in range(1, 4):
+            scores: dict[str, int] = {}
+            for criterion_key, criterion_label, _ in IMAGE_EXPERT_CRITERIA:
+                scores[criterion_key] = validate_score_value(
+                    image_responses[slot][criterion_key],
+                    f"Imagen {slot} · {criterion_label}",
+                )
+            validated_images[str(slot)] = {
+                "label": f"Imagen {slot}",
+                "scores": scores,
+            }
+
+        validated_summary = {
+            question_key: validate_required_text(str(summary_answers[question_key] or ""), question_label)
+            for question_key, question_label in IMAGE_SUMMARY_QUESTIONS
+        }
+
+        responses = {
+            "kind": "image",
+            "scale": SCORE_LABELS,
+            "images": validated_images,
+            "summary": validated_summary,
+            "reference_image": {
+                "present": has_reference_image,
+                "score": (
+                    validate_score_value(reference_score, "Pertinencia de la Imagen 4 como referencia adicional")
+                    if has_reference_image
+                    else None
+                ),
+            },
+        }
+        cleaned_observations = observations.strip() or None
+        save_image_expert_review(
+            evaluation["id"],
+            cleaned_name,
+            cleaned_specialty,
+            cleaned_institution,
+            responses,
+            observations=cleaned_observations,
+        )
+        st.session_state["image_expert_review_flash"] = "La evaluación experta de imágenes se guardó correctamente."
+        st.rerun()
+    except Exception as exc:
+        st.error(str(exc))
+
+
+def render_scored_review_block(
+    title: str,
+    values: dict[str, int],
+    criteria: list[tuple[str, str, str]],
+) -> None:
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        lines = []
+        for criterion_key, criterion_label, _ in criteria:
+            score = values.get(criterion_key)
+            if score is None:
+                continue
+            lines.append(f"- {criterion_label}: **{score}/5** ({SCORE_LABELS.get(int(score), 'Sin escala')})")
+        st.markdown("\n".join(lines) if lines else "_Sin respuestas registradas._")
+
+
+def render_text_expert_reviews(reviews: list[dict[str, object]]) -> None:
+    st.markdown("### Evaluaciones expertas guardadas")
+    if not reviews:
+        st.info("Todavía no hay evaluaciones expertas guardadas para esta evaluación de texto.")
+        return
+
+    for review in reviews:
+        header = f"{review['display_name']} · {format_timestamp(review['created_at'])}"
+        with st.expander(header):
+            st.caption(f"{review['evaluator_specialty']} · {review['evaluator_institution']}")
+            responses = review.get("responses", {})
+            for candidate in responses.get("candidates", {}).values():
+                render_scored_review_block(
+                    str(candidate.get("label", "Texto")),
+                    dict(candidate.get("scores", {})),
+                    TEXT_EXPERT_CRITERIA,
+                )
+
+            summary = responses.get("summary", {})
+            if summary:
+                st.markdown("**Comparación global**")
+                st.markdown(
+                    "\n".join(
+                        f"- {question_label}: **{summary.get(question_key, 'Sin respuesta')}**"
+                        for question_key, question_label in TEXT_SUMMARY_QUESTIONS
+                    )
+                )
+
+            if review.get("observations"):
+                st.markdown("**Observaciones**")
+                st.write(str(review["observations"]))
+
+
+def render_image_expert_reviews(reviews: list[dict[str, object]]) -> None:
+    st.markdown("### Evaluaciones expertas guardadas")
+    if not reviews:
+        st.info("Todavía no hay evaluaciones expertas guardadas para esta evaluación de imágenes.")
+        return
+
+    for review in reviews:
+        header = f"{review['display_name']} · {format_timestamp(review['created_at'])}"
+        with st.expander(header):
+            st.caption(f"{review['evaluator_specialty']} · {review['evaluator_institution']}")
+            responses = review.get("responses", {})
+            for image in responses.get("images", {}).values():
+                render_scored_review_block(
+                    str(image.get("label", "Imagen")),
+                    dict(image.get("scores", {})),
+                    IMAGE_EXPERT_CRITERIA,
+                )
+
+            summary = responses.get("summary", {})
+            if summary:
+                st.markdown("**Comparación global**")
+                st.markdown(
+                    "\n".join(
+                        f"- {question_label}: **{summary.get(question_key, 'Sin respuesta')}**"
+                        for question_key, question_label in IMAGE_SUMMARY_QUESTIONS
+                    )
+                )
+
+            reference_info = responses.get("reference_image", {})
+            if reference_info.get("present"):
+                reference_score = reference_info.get("score")
+                st.markdown(
+                    f"**Imagen 4 de referencia**: {reference_score}/5 "
+                    f"({SCORE_LABELS.get(int(reference_score), 'Sin escala')})"
+                )
+
+            if review.get("observations"):
+                st.markdown("**Observaciones**")
+                st.write(str(review["observations"]))
+
+
+def render_text_history_section(
+    history: list[dict[str, object]],
+    storage_status: StorageStatus,
+    write_access_status: WriteAccessStatus,
+) -> None:
     st.subheader("Historial de texto")
+    flash_message = pop_flash_message("text_expert_review_flash")
+    if flash_message:
+        st.success(flash_message)
     if not history:
         st.info("Todavía no hay evaluaciones de texto guardadas.")
         return
 
-    for evaluation in history:
-        created_at = format_timestamp(evaluation["created_at"])
-        with st.expander(f"Evaluación de texto · {created_at}"):
-            st.text_area(
-                "Fuente",
-                value=str(evaluation["source_text"]),
-                height=140,
-                disabled=True,
-                key=f"text_source_{evaluation['id']}",
-            )
-            for candidate in evaluation["candidates"]:
-                with st.container(border=True):
-                    st.markdown(f"**{candidate['label']}**")
-                    st.text_area(
-                        candidate["label"],
-                        value=str(candidate["candidate_text"]),
-                        height=120,
-                        disabled=True,
-                        key=f"text_candidate_{evaluation['id']}_{candidate['slot']}",
-                    )
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("BLEU", format_metric(float(candidate["bleu_score"])))
-                    col2.metric("BERTScore Precision", format_metric(float(candidate["bert_precision"])))
-                    col3.metric("BERTScore Recall", format_metric(float(candidate["bert_recall"])))
-                    col4.metric("BERTScore F1", format_metric(float(candidate["bert_f1"])))
+    selected_evaluation = render_history_stepper("text", history)
+    render_text_history_snapshot(selected_evaluation)
+    st.divider()
+    render_text_expert_reviews(list(selected_evaluation.get("expert_reviews", [])))
+    st.divider()
+    render_text_expert_review_form(selected_evaluation, storage_status, write_access_status)
 
 
-def render_image_history(history: list[dict[str, object]]) -> None:
+def render_image_history_section(
+    history: list[dict[str, object]],
+    storage_status: StorageStatus,
+    write_access_status: WriteAccessStatus,
+) -> None:
     st.subheader("Historial de imágenes")
+    flash_message = pop_flash_message("image_expert_review_flash")
+    if flash_message:
+        st.success(flash_message)
     if not history:
         st.info("Todavía no hay evaluaciones de imágenes guardadas.")
         return
 
-    for evaluation in history:
-        created_at = format_timestamp(evaluation["created_at"])
-        with st.expander(f"Evaluación de imágenes · {created_at}"):
-            prompt_texts = evaluation.get("prompt_texts", {})
-            prompt_columns = st.columns(3)
-            for slot in range(1, 4):
-                with prompt_columns[slot - 1]:
-                    st.text_area(
-                        f"Texto Imagen {slot}",
-                        value=str(prompt_texts.get(slot, "")),
-                        height=120,
-                        disabled=True,
-                        key=f"image_prompt_{evaluation['id']}_{slot}",
-                    )
-
-            st.markdown("**Resultados FID**")
-            fid_col1, fid_col2, fid_col3 = st.columns(3)
-            fid_col1.metric("FID Imagen 1 vs referencia", format_metric(float(evaluation["fid_1_vs_23"])))
-            fid_col2.metric("FID Imagen 2 vs referencia", format_metric(float(evaluation["fid_2_vs_13"])))
-            fid_col3.metric("FID Imagen 3 vs referencia", format_metric(float(evaluation["fid_3_vs_12"])))
-
-            st.markdown("**Resultados CLIPScore**")
-            clip_col1, clip_col2, clip_col3 = st.columns(3)
-            clip_col1.metric("CLIPScore Imagen 1 vs Texto", format_metric(float(evaluation["clip_1"])))
-            clip_col2.metric("CLIPScore Imagen 2 vs Texto", format_metric(float(evaluation["clip_2"])))
-            clip_col3.metric("CLIPScore Imagen 3 vs Texto", format_metric(float(evaluation["clip_3"])))
-
-            image_columns = st.columns(4)
-            for column, asset in zip(image_columns, evaluation["assets"]):
-                with column:
-                    st.markdown(f"**Imagen {asset['slot']}**")
-                    st.caption(asset["filename"])
-                    st.caption(f"SHA256: {asset['sha256']}")
-                    try:
-                        preview = Image.open(io.BytesIO(asset["image_bytes"]))
-                        preview.load()
-                        st.image(preview, use_container_width=True)
-                    except Exception:
-                        st.warning(f"No se pudo reconstruir la Imagen {asset['slot']} guardada.")
+    selected_evaluation = render_history_stepper("image", history)
+    render_image_history_snapshot(selected_evaluation)
+    st.divider()
+    render_image_expert_reviews(list(selected_evaluation.get("expert_reviews", [])))
+    st.divider()
+    render_image_expert_review_form(selected_evaluation, storage_status, write_access_status)
 
 
-def render_history_tab(storage_status: StorageStatus) -> None:
+def render_history_tab(storage_status: StorageStatus, write_access_status: WriteAccessStatus) -> None:
     st.subheader("Historial")
     if not storage_status.available:
         st.info("El historial requiere una base PostgreSQL configurada mediante DATABASE_URL.")
@@ -532,9 +1020,11 @@ def render_history_tab(storage_status: StorageStatus) -> None:
         st.error(f"No se pudo cargar el historial: {exc}")
         return
 
-    render_text_history(text_history)
-    st.divider()
-    render_image_history(image_history)
+    text_history_tab, image_history_tab = st.tabs(["Texto", "Imágenes"])
+    with text_history_tab:
+        render_text_history_section(text_history, storage_status, write_access_status)
+    with image_history_tab:
+        render_image_history_section(image_history, storage_status, write_access_status)
 
 
 def main() -> None:
@@ -685,7 +1175,7 @@ def main() -> None:
                 st.error(str(exc))
 
     with history_tab:
-        render_history_tab(storage_status)
+        render_history_tab(storage_status, write_access_status)
 
 
 if __name__ == "__main__":

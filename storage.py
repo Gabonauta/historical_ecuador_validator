@@ -36,6 +36,10 @@ class TextEvaluation(Base):
         cascade="all, delete-orphan",
         order_by="TextCandidateResult.slot",
     )
+    expert_reviews: Mapped[list["TextExpertReview"]] = relationship(
+        back_populates="evaluation",
+        cascade="all, delete-orphan",
+    )
 
 
 class TextCandidateResult(Base):
@@ -57,6 +61,24 @@ class TextCandidateResult(Base):
     evaluation: Mapped[TextEvaluation] = relationship(back_populates="candidates")
 
 
+class TextExpertReview(Base):
+    __tablename__ = "text_expert_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    text_evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("text_evaluations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    evaluator_name: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluator_specialty: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluator_institution: Mapped[str] = mapped_column(Text, nullable=False)
+    observations: Mapped[str | None] = mapped_column(Text, nullable=True)
+    responses_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluation: Mapped[TextEvaluation] = relationship(back_populates="expert_reviews")
+
+
 class ImageEvaluation(Base):
     __tablename__ = "image_evaluations"
 
@@ -73,6 +95,10 @@ class ImageEvaluation(Base):
         back_populates="evaluation",
         cascade="all, delete-orphan",
         order_by="ImageAsset.slot",
+    )
+    expert_reviews: Mapped[list["ImageExpertReview"]] = relationship(
+        back_populates="evaluation",
+        cascade="all, delete-orphan",
     )
 
 
@@ -91,6 +117,24 @@ class ImageAsset(Base):
     sha256: Mapped[str] = mapped_column(Text, nullable=False)
     image_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     evaluation: Mapped[ImageEvaluation] = relationship(back_populates="assets")
+
+
+class ImageExpertReview(Base):
+    __tablename__ = "image_expert_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    image_evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("image_evaluations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    evaluator_name: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluator_specialty: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluator_institution: Mapped[str] = mapped_column(Text, nullable=False)
+    observations: Mapped[str | None] = mapped_column(Text, nullable=True)
+    responses_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluation: Mapped[ImageEvaluation] = relationship(back_populates="expert_reviews")
 
 
 @dataclass(frozen=True)
@@ -160,6 +204,29 @@ def deserialize_image_prompt_texts(raw_prompt_text: str) -> dict[int, str]:
     return parsed or {1: raw_prompt_text}
 
 
+def _json_dump(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _json_load(value: str) -> Any:
+    return json.loads(value)
+
+
+def _serialize_expert_review(
+    review: TextExpertReview | ImageExpertReview,
+) -> dict[str, Any]:
+    return {
+        "id": str(review.id),
+        "created_at": review.created_at,
+        "evaluator_name": review.evaluator_name,
+        "evaluator_specialty": review.evaluator_specialty,
+        "evaluator_institution": review.evaluator_institution,
+        "display_name": f"{review.evaluator_name} - {review.evaluator_institution}",
+        "observations": review.observations,
+        "responses": _json_load(review.responses_json),
+    }
+
+
 @lru_cache(maxsize=4)
 def get_engine(database_url: str) -> Engine:
     return create_engine(database_url, pool_pre_ping=True)
@@ -207,6 +274,15 @@ def _get_required_database_url() -> str:
         raise RuntimeError("No se encontró DATABASE_URL para persistencia.")
     ensure_database_ready(database_url)
     return database_url
+
+
+def _coerce_uuid(value: str | uuid.UUID, field_name: str) -> uuid.UUID:
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except ValueError as exc:
+        raise ValueError(f"El identificador '{field_name}' no tiene un formato UUID válido.") from exc
 
 
 def _prepare_image_payloads(uploaded_files: list[Any]) -> list[dict[str, Any]]:
@@ -303,6 +379,58 @@ def save_image_evaluation(
     return evaluation.id
 
 
+def save_text_expert_review(
+    text_evaluation_id: str | uuid.UUID,
+    evaluator_name: str,
+    evaluator_specialty: str,
+    evaluator_institution: str,
+    responses: dict[str, Any],
+    observations: str | None = None,
+) -> uuid.UUID:
+    database_url = _get_required_database_url()
+    session_factory = get_session_factory(database_url)
+    evaluation_uuid = _coerce_uuid(text_evaluation_id, "text_evaluation_id")
+
+    with session_factory.begin() as session:
+        review = TextExpertReview(
+            text_evaluation_id=evaluation_uuid,
+            evaluator_name=evaluator_name,
+            evaluator_specialty=evaluator_specialty,
+            evaluator_institution=evaluator_institution,
+            observations=observations,
+            responses_json=_json_dump(responses),
+        )
+        session.add(review)
+        session.flush()
+        return review.id
+
+
+def save_image_expert_review(
+    image_evaluation_id: str | uuid.UUID,
+    evaluator_name: str,
+    evaluator_specialty: str,
+    evaluator_institution: str,
+    responses: dict[str, Any],
+    observations: str | None = None,
+) -> uuid.UUID:
+    database_url = _get_required_database_url()
+    session_factory = get_session_factory(database_url)
+    evaluation_uuid = _coerce_uuid(image_evaluation_id, "image_evaluation_id")
+
+    with session_factory.begin() as session:
+        review = ImageExpertReview(
+            image_evaluation_id=evaluation_uuid,
+            evaluator_name=evaluator_name,
+            evaluator_specialty=evaluator_specialty,
+            evaluator_institution=evaluator_institution,
+            observations=observations,
+            responses_json=_json_dump(responses),
+        )
+        session.add(review)
+        session.flush()
+        return review.id
+
+
 def list_recent_text_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, Any]]:
     database_url = _get_required_database_url()
     session_factory = get_session_factory(database_url)
@@ -310,7 +438,10 @@ def list_recent_text_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, A
     with session_factory() as session:
         stmt = (
             select(TextEvaluation)
-            .options(selectinload(TextEvaluation.candidates))
+            .options(
+                selectinload(TextEvaluation.candidates),
+                selectinload(TextEvaluation.expert_reviews),
+            )
             .order_by(TextEvaluation.created_at.desc())
             .limit(limit)
         )
@@ -333,6 +464,14 @@ def list_recent_text_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, A
                 }
                 for candidate in evaluation.candidates
             ],
+            "expert_reviews": [
+                _serialize_expert_review(review)
+                for review in sorted(
+                    evaluation.expert_reviews,
+                    key=lambda current: current.created_at.timestamp() if current.created_at else 0.0,
+                    reverse=True,
+                )
+            ],
         }
         for evaluation in evaluations
     ]
@@ -345,7 +484,10 @@ def list_recent_image_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, 
     with session_factory() as session:
         stmt = (
             select(ImageEvaluation)
-            .options(selectinload(ImageEvaluation.assets))
+            .options(
+                selectinload(ImageEvaluation.assets),
+                selectinload(ImageEvaluation.expert_reviews),
+            )
             .order_by(ImageEvaluation.created_at.desc())
             .limit(limit)
         )
@@ -372,6 +514,14 @@ def list_recent_image_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, 
                     "image_bytes": asset.image_bytes,
                 }
                 for asset in evaluation.assets
+            ],
+            "expert_reviews": [
+                _serialize_expert_review(review)
+                for review in sorted(
+                    evaluation.expert_reviews,
+                    key=lambda current: current.created_at.timestamp() if current.created_at else 0.0,
+                    reverse=True,
+                )
             ],
         }
         for evaluation in evaluations
