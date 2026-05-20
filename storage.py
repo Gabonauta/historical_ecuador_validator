@@ -19,6 +19,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 
 MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
 HISTORY_LIMIT = 20
+SUPABASE_PUBLIC_TABLES = (
+    "text_evaluations",
+    "text_candidate_results",
+    "image_evaluations",
+    "image_assets",
+    "text_expert_reviews",
+    "image_expert_reviews",
+)
 
 
 class Base(DeclarativeBase):
@@ -239,8 +247,20 @@ def get_session_factory(database_url: str) -> sessionmaker[Session]:
 
 @lru_cache(maxsize=4)
 def ensure_database_ready(database_url: str) -> bool:
-    Base.metadata.create_all(get_engine(database_url))
+    engine = get_engine(database_url)
+    Base.metadata.create_all(engine)
+    _ensure_supabase_rls(engine)
     return True
+
+
+def _ensure_supabase_rls(engine: Engine) -> None:
+    """Enable RLS on exposed public tables so Supabase's Data API doesn't flag them."""
+    if engine.dialect.name != "postgresql":
+        return
+
+    with engine.begin() as connection:
+        for table_name in SUPABASE_PUBLIC_TABLES:
+            connection.exec_driver_sql(f"ALTER TABLE public.{table_name} ENABLE ROW LEVEL SECURITY")
 
 
 def get_storage_status() -> StorageStatus:
