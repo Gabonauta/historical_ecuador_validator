@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import streamlit as st
 from sqlalchemy import DateTime, Double, ForeignKey, LargeBinary, SmallInteger, Text, Uuid, create_engine, func, select
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, selectinload, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, load_only, mapped_column, relationship, selectinload, sessionmaker
 
 
 MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
@@ -451,6 +451,45 @@ def save_image_expert_review(
         return review.id
 
 
+def get_image_assets_for_evaluation(evaluation_id: str | uuid.UUID, include_bytes: bool = True) -> list[dict[str, Any]]:
+    database_url = _get_required_database_url()
+    session_factory = get_session_factory(database_url)
+    evaluation_uuid = _coerce_uuid(evaluation_id, "image_evaluation_id")
+
+    with session_factory() as session:
+        loader = selectinload(ImageEvaluation.assets)
+        if not include_bytes:
+            loader = loader.load_only(
+                ImageAsset.id,
+                ImageAsset.slot,
+                ImageAsset.filename,
+                ImageAsset.mime_type,
+                ImageAsset.sha256,
+            )
+
+        stmt = (
+            select(ImageEvaluation)
+            .options(loader)
+            .where(ImageEvaluation.id == evaluation_uuid)
+        )
+        evaluation = session.scalars(stmt).first()
+
+    if evaluation is None:
+        return []
+
+    return [
+        {
+            "id": str(asset.id),
+            "slot": asset.slot,
+            "filename": asset.filename,
+            "mime_type": asset.mime_type,
+            "sha256": asset.sha256,
+            **({"image_bytes": asset.image_bytes} if include_bytes else {}),
+        }
+        for asset in evaluation.assets
+    ]
+
+
 def list_recent_text_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, Any]]:
     database_url = _get_required_database_url()
     session_factory = get_session_factory(database_url)
@@ -505,7 +544,13 @@ def list_recent_image_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, 
         stmt = (
             select(ImageEvaluation)
             .options(
-                selectinload(ImageEvaluation.assets),
+                selectinload(ImageEvaluation.assets).load_only(
+                    ImageAsset.id,
+                    ImageAsset.slot,
+                    ImageAsset.filename,
+                    ImageAsset.mime_type,
+                    ImageAsset.sha256,
+                ),
                 selectinload(ImageEvaluation.expert_reviews),
             )
             .order_by(ImageEvaluation.created_at.desc())
@@ -527,11 +572,11 @@ def list_recent_image_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, 
             "clip_3": evaluation.clip_3,
             "assets": [
                 {
+                    "id": str(asset.id),
                     "slot": asset.slot,
                     "filename": asset.filename,
                     "mime_type": asset.mime_type,
                     "sha256": asset.sha256,
-                    "image_bytes": asset.image_bytes,
                 }
                 for asset in evaluation.assets
             ],

@@ -21,6 +21,7 @@ from storage import (
     HISTORY_LIMIT,
     MAX_IMAGE_SIZE_BYTES,
     StorageStatus,
+    get_image_assets_for_evaluation,
     get_storage_status,
     list_recent_image_evaluations,
     list_recent_text_evaluations,
@@ -291,6 +292,11 @@ def format_timestamp(value: datetime | None) -> str:
     if value is None:
         return "Sin fecha"
     return value.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+
+
+@st.cache_data(show_spinner=False)
+def get_cached_image_assets_for_history(evaluation_id: str) -> list[dict[str, object]]:
+    return get_image_assets_for_evaluation(evaluation_id, include_bytes=True)
 
 
 def pop_flash_message(key: str) -> str | None:
@@ -608,12 +614,37 @@ def render_image_history_snapshot(evaluation: dict[str, object]) -> None:
     clip_col2.metric("CLIPScore Imagen 2 vs Texto", format_metric(float(evaluation["clip_2"])))
     clip_col3.metric("CLIPScore Imagen 3 vs Texto", format_metric(float(evaluation["clip_3"])))
 
+    st.markdown("**Activos guardados**")
     image_columns = st.columns(4)
     for column, asset in zip(image_columns, evaluation["assets"]):
         with column:
             st.markdown(f"**Imagen {asset['slot']}**")
             st.caption(asset["filename"])
             st.caption(f"SHA256: {asset['sha256']}")
+
+    st.caption(
+        "Las previsualizaciones guardadas se cargan bajo demanda para reducir egress en Supabase."
+    )
+    preview_toggle_key = f"load_previews_{evaluation['id']}"
+    load_previews = st.toggle(
+        "Cargar previsualizaciones guardadas",
+        key=preview_toggle_key,
+        value=False,
+    )
+
+    if not load_previews:
+        return
+
+    try:
+        preview_assets = get_cached_image_assets_for_history(str(evaluation["id"]))
+    except Exception as exc:
+        st.warning(f"No se pudieron cargar las imágenes guardadas: {exc}")
+        return
+
+    preview_columns = st.columns(4)
+    for column, asset in zip(preview_columns, preview_assets):
+        with column:
+            st.markdown(f"**Preview Imagen {asset['slot']}**")
             try:
                 preview = Image.open(io.BytesIO(asset["image_bytes"]))
                 preview.load()
