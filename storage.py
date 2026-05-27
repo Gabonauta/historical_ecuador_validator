@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import streamlit as st
-from sqlalchemy import DateTime, Double, ForeignKey, LargeBinary, SmallInteger, Text, Uuid, create_engine, func, select
+from sqlalchemy import DateTime, Double, ForeignKey, LargeBinary, SmallInteger, Text, Uuid, create_engine, func, inspect, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, load_only, mapped_column, relationship, selectinload, sessionmaker
 
@@ -27,6 +27,7 @@ SUPABASE_PUBLIC_TABLES = (
     "text_expert_reviews",
     "image_expert_reviews",
 )
+REQUIRED_PUBLIC_TABLES = SUPABASE_PUBLIC_TABLES
 
 
 class Base(DeclarativeBase):
@@ -183,6 +184,15 @@ def resolve_write_password() -> str | None:
     return _get_secret_value("STORAGE_WRITE_PASSWORD") or os.getenv("STORAGE_WRITE_PASSWORD")
 
 
+def resolve_db_auto_migrate() -> bool:
+    raw_value = _get_secret_value("DB_AUTO_MIGRATE") or os.getenv("DB_AUTO_MIGRATE")
+    if raw_value is None:
+        return False
+
+    normalized = str(raw_value).strip().lower()
+    return normalized in {"1", "true", "t", "yes", "y", "on"}
+
+
 def serialize_image_prompt_texts(prompt_texts: dict[int, str]) -> str:
     return json.dumps(
         {
@@ -237,7 +247,11 @@ def _serialize_expert_review(
 
 @lru_cache(maxsize=4)
 def get_engine(database_url: str) -> Engine:
-    return create_engine(database_url, pool_pre_ping=True)
+    return create_engine(
+        database_url,
+        pool_pre_ping=True,
+        connect_args={"application_name": "historical_evaluator_streamlit"},
+    )
 
 
 @lru_cache(maxsize=4)
@@ -245,12 +259,29 @@ def get_session_factory(database_url: str) -> sessionmaker[Session]:
     return sessionmaker(bind=get_engine(database_url), expire_on_commit=False)
 
 
-@lru_cache(maxsize=4)
-def ensure_database_ready(database_url: str) -> bool:
+@lru_cache(maxsize=8)
+def ensure_database_ready(database_url: str, auto_migrate: bool) -> bool:
     engine = get_engine(database_url)
-    Base.metadata.create_all(engine)
-    _ensure_supabase_rls(engine)
+    if auto_migrate:
+        Base.metadata.create_all(engine)
+        _ensure_supabase_rls(engine)
+
+    _validate_required_tables(engine)
     return True
+
+
+def _validate_required_tables(engine: Engine) -> None:
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names(schema="public"))
+    missing_tables = [table for table in REQUIRED_PUBLIC_TABLES if table not in existing_tables]
+
+    if missing_tables:
+        missing = ", ".join(missing_tables)
+        raise RuntimeError(
+            "Faltan tablas requeridas en PostgreSQL. "
+            "Ejecuta el SQL de bootstrap/migración y vuelve a intentar. "
+            f"Tablas faltantes: {missing}."
+        )
 
 
 def _ensure_supabase_rls(engine: Engine) -> None:
@@ -265,6 +296,7 @@ def _ensure_supabase_rls(engine: Engine) -> None:
 
 def get_storage_status() -> StorageStatus:
     database_url = resolve_database_url()
+    auto_migrate = resolve_db_auto_migrate()
     if not database_url:
         return StorageStatus(
             configured=False,
@@ -273,26 +305,33 @@ def get_storage_status() -> StorageStatus:
         )
 
     try:
-        ensure_database_ready(database_url)
+        ensure_database_ready(database_url, auto_migrate)
     except Exception as exc:
         return StorageStatus(
             configured=True,
             available=False,
-            message=f"Persistencia no disponible: {exc}",
+            message=(
+                "Persistencia no disponible: error de conexión o inicialización "
+                f"({type(exc).__name__})."
+            ),
         )
 
     return StorageStatus(
         configured=True,
         available=True,
-        message="Persistencia activa en PostgreSQL.",
+        message=(
+            "Persistencia activa en PostgreSQL. "
+            f"DB_AUTO_MIGRATE={'on' if auto_migrate else 'off'}."
+        ),
     )
 
 
 def _get_required_database_url() -> str:
     database_url = resolve_database_url()
+    auto_migrate = resolve_db_auto_migrate()
     if not database_url:
         raise RuntimeError("No se encontró DATABASE_URL para persistencia.")
-    ensure_database_ready(database_url)
+    ensure_database_ready(database_url, auto_migrate)
     return database_url
 
 
@@ -490,19 +529,44 @@ def get_image_assets_for_evaluation(evaluation_id: str | uuid.UUID, include_byte
     ]
 
 
-def list_recent_text_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, Any]]:
+def list_recent_text_evaluations(limit: int = HISTORY_LIMIT, offset: int = 0) -> list[dict[str, Any]]:
     database_url = _get_required_database_url()
     session_factory = get_session_factory(database_url)
+
+    safe_limit = max(1, int(limit))
+    safe_offset = max(0, int(offset))
 
     with session_factory() as session:
         stmt = (
             select(TextEvaluation)
             .options(
-                selectinload(TextEvaluation.candidates),
-                selectinload(TextEvaluation.expert_reviews),
+                load_only(
+                    TextEvaluation.id,
+                    TextEvaluation.created_at,
+                    TextEvaluation.source_text,
+                ),
+                selectinload(TextEvaluation.candidates).load_only(
+                    TextCandidateResult.slot,
+                    TextCandidateResult.label,
+                    TextCandidateResult.candidate_text,
+                    TextCandidateResult.bleu_score,
+                    TextCandidateResult.bert_precision,
+                    TextCandidateResult.bert_recall,
+                    TextCandidateResult.bert_f1,
+                ),
+                selectinload(TextEvaluation.expert_reviews).load_only(
+                    TextExpertReview.id,
+                    TextExpertReview.created_at,
+                    TextExpertReview.evaluator_name,
+                    TextExpertReview.evaluator_specialty,
+                    TextExpertReview.evaluator_institution,
+                    TextExpertReview.observations,
+                    TextExpertReview.responses_json,
+                ),
             )
             .order_by(TextEvaluation.created_at.desc())
-            .limit(limit)
+            .offset(safe_offset)
+            .limit(safe_limit)
         )
         evaluations = session.scalars(stmt).all()
 
@@ -536,14 +600,28 @@ def list_recent_text_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, A
     ]
 
 
-def list_recent_image_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, Any]]:
+def list_recent_image_evaluations(limit: int = HISTORY_LIMIT, offset: int = 0) -> list[dict[str, Any]]:
     database_url = _get_required_database_url()
     session_factory = get_session_factory(database_url)
+
+    safe_limit = max(1, int(limit))
+    safe_offset = max(0, int(offset))
 
     with session_factory() as session:
         stmt = (
             select(ImageEvaluation)
             .options(
+                load_only(
+                    ImageEvaluation.id,
+                    ImageEvaluation.created_at,
+                    ImageEvaluation.prompt_text,
+                    ImageEvaluation.fid_1_vs_23,
+                    ImageEvaluation.fid_2_vs_13,
+                    ImageEvaluation.fid_3_vs_12,
+                    ImageEvaluation.clip_1,
+                    ImageEvaluation.clip_2,
+                    ImageEvaluation.clip_3,
+                ),
                 selectinload(ImageEvaluation.assets).load_only(
                     ImageAsset.id,
                     ImageAsset.slot,
@@ -551,10 +629,19 @@ def list_recent_image_evaluations(limit: int = HISTORY_LIMIT) -> list[dict[str, 
                     ImageAsset.mime_type,
                     ImageAsset.sha256,
                 ),
-                selectinload(ImageEvaluation.expert_reviews),
+                selectinload(ImageEvaluation.expert_reviews).load_only(
+                    ImageExpertReview.id,
+                    ImageExpertReview.created_at,
+                    ImageExpertReview.evaluator_name,
+                    ImageExpertReview.evaluator_specialty,
+                    ImageExpertReview.evaluator_institution,
+                    ImageExpertReview.observations,
+                    ImageExpertReview.responses_json,
+                ),
             )
             .order_by(ImageEvaluation.created_at.desc())
-            .limit(limit)
+            .offset(safe_offset)
+            .limit(safe_limit)
         )
         evaluations = session.scalars(stmt).all()
 

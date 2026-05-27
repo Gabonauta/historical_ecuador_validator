@@ -120,7 +120,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Persistencia en PostgreSQL (GCP / Streamlit Cloud)
+## Persistencia en PostgreSQL (Supabase / Streamlit Cloud)
 
 La app soporta persistencia opcional en PostgreSQL mediante `DATABASE_URL`.
 
@@ -145,32 +145,54 @@ Puedes configurarlos en `.streamlit/secrets.toml` en local o en `Secrets` dentro
 Ejemplo:
 
 ```toml
-DATABASE_URL = "postgresql+psycopg://historical_app:TU_PASSWORD@TU_HOST:5432/historical_validator?sslmode=require"
+DATABASE_URL = "postgresql+psycopg://postgres.qcsxbtzfhlimqiyftaxc:TU_PASSWORD@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
 DB_SSLMODE = "require"
 STORAGE_WRITE_PASSWORD = "CAMBIA_ESTA_CLAVE"
+DB_AUTO_MIGRATE = "false"
 ```
 
 Notas:
 
 - `DB_SSLMODE` es opcional si ya lo incluyes dentro de `DATABASE_URL`
-- para GCP Cloud SQL con acceso público, lo esperado en esta app es `sslmode=require`
+- para Supabase Shared Pooler, lo esperado en esta app es `sslmode=require`
 - las imágenes se almacenan en PostgreSQL como binario (`BYTEA`) en esta v1
 - si defines `STORAGE_WRITE_PASSWORD`, la app solo guardará datos cuando el usuario la ingrese correctamente en la barra lateral
+- `DB_AUTO_MIGRATE` controla si la app ejecuta `create_all()` y `ENABLE RLS` al arrancar:
+  - `true`: útil solo para bootstrap/migración con rol administrador
+  - `false`: recomendado en producción con rol de aplicación de privilegios mínimos
 
 ### Ejemplo para Streamlit Cloud
 
 ```toml
-DATABASE_URL = "postgresql+psycopg://appuser:TU_PASSWORD@35.188.91.134:5432/appdb?sslmode=require"
+DATABASE_URL = "postgresql+psycopg://postgres.qcsxbtzfhlimqiyftaxc:TU_PASSWORD@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
 DB_SSLMODE = "require"
 STORAGE_WRITE_PASSWORD = "CAMBIA_POR_UNA_CLAVE_SEGURA"
+DB_AUTO_MIGRATE = "false"
 ```
 
-### Ejemplo local con Cloud SQL Proxy
+### Bootstrap seguro en Supabase (rol mínimo)
+
+1. Ejecuta [supabase_least_privilege_setup.sql](/Users/dragonborn/Documents/repo/historical_evaluator/supabase_least_privilege_setup.sql) en Supabase SQL Editor usando un rol administrador.
+2. Cambia `CHANGE_ME_STRONG_PASSWORD` por una contraseña nueva y robusta.
+3. Usa `historical_app` en `DATABASE_URL` de Streamlit Cloud.
+4. Mantén `DB_AUTO_MIGRATE = "false"` en producción.
+
+Ejemplo:
 
 ```toml
-DATABASE_URL = "postgresql+psycopg://appuser:TU_PASSWORD@127.0.0.1:5432/appdb?sslmode=disable"
-DB_SSLMODE = "disable"
+DATABASE_URL = "postgresql+psycopg://historical_app:TU_PASSWORD_URL_ENCODED@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
+DB_SSLMODE = "require"
 STORAGE_WRITE_PASSWORD = "CAMBIA_POR_UNA_CLAVE_SEGURA"
+DB_AUTO_MIGRATE = "false"
+```
+
+### Ejemplo local con Supabase Shared Pooler
+
+```toml
+DATABASE_URL = "postgresql+psycopg://postgres.qcsxbtzfhlimqiyftaxc:TU_PASSWORD@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
+DB_SSLMODE = "require"
+STORAGE_WRITE_PASSWORD = "CAMBIA_POR_UNA_CLAVE_SEGURA"
+DB_AUTO_MIGRATE = "false"
 ```
 
 ## Consideraciones de uso

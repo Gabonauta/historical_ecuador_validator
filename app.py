@@ -18,7 +18,6 @@ from transformers import CLIPModel, CLIPProcessor
 from torchvision.transforms import functional as TF
 
 from storage import (
-    HISTORY_LIMIT,
     MAX_IMAGE_SIZE_BYTES,
     StorageStatus,
     get_image_assets_for_evaluation,
@@ -47,6 +46,7 @@ SCORE_CAPTIONS: Final[list[str]] = [
     "Excelente",
 ]
 SCORE_LABELS: Final[dict[int, str]] = dict(zip(SCORE_OPTIONS, SCORE_CAPTIONS))
+HISTORY_PAGE_SIZE: Final[int] = 5
 
 TEXT_EXPERT_CRITERIA: Final[list[tuple[str, str, str]]] = [
     ("fidelidad_factual", "Fidelidad factual", "Conserva hechos, relaciones y atributos de la fuente sin errores."),
@@ -294,9 +294,36 @@ def format_timestamp(value: datetime | None) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
 
 
-@st.cache_data(show_spinner=False)
+def is_tab_selected(tab_container: Any) -> bool:
+    """Return selected-state for modern tabs and stay compatible with older builds."""
+    open_state = getattr(tab_container, "open", None)
+    if open_state is None:
+        return True
+    return bool(open_state)
+
+
+@st.cache_data(ttl=600, max_entries=100, show_spinner=False)
 def get_cached_image_assets_for_history(evaluation_id: str) -> list[dict[str, object]]:
     return get_image_assets_for_evaluation(evaluation_id, include_bytes=True)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_text_history(limit: int, offset: int) -> list[dict[str, object]]:
+    """Cache text history snapshots to avoid repeated DB reads on reruns."""
+    return list_recent_text_evaluations(limit=limit, offset=offset)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_image_history(limit: int, offset: int) -> list[dict[str, object]]:
+    """Cache image history snapshots to avoid repeated DB reads on reruns."""
+    return list_recent_image_evaluations(limit=limit, offset=offset)
+
+
+def clear_history_caches() -> None:
+    """Invalidate history caches after successful writes."""
+    get_cached_text_history.clear()
+    get_cached_image_history.clear()
+    get_cached_image_assets_for_history.clear()
 
 
 def pop_flash_message(key: str) -> str | None:
@@ -317,6 +344,14 @@ def scale_markdown() -> str:
         "| 4 | Bueno |\n"
         "| 5 | Excelente |"
     )
+
+
+def render_safe_exception(exc: Exception, generic_message: str) -> None:
+    """Show validation errors as-is and mask unexpected technical errors."""
+    if isinstance(exc, ValueError):
+        st.error(str(exc))
+        return
+    st.error(generic_message)
 
 
 def validate_text_inputs(source_text: str, candidate_texts: list[str]) -> tuple[str, list[tuple[str, str]]]:
@@ -491,10 +526,11 @@ def persist_text_results(
 
     try:
         save_text_evaluation(source_text, results)
+        clear_history_caches()
         st.caption("La evaluación de texto se guardó en el historial.")
     except Exception as exc:
         st.warning("La evaluación de texto se calculó, pero no se pudo guardar en la base de datos.")
-        st.caption(f"Detalle técnico: {exc}")
+        st.caption(f"Tipo de error: {type(exc).__name__}")
 
 
 def persist_image_results(
@@ -513,10 +549,11 @@ def persist_image_results(
 
     try:
         save_image_evaluation(prompt_texts, uploaded_files, fid_results, clip_results)
+        clear_history_caches()
         st.caption("La evaluación de imágenes se guardó en el historial.")
     except Exception as exc:
         st.warning("La evaluación de imágenes se calculó, pero no se pudo guardar en la base de datos.")
-        st.caption(f"Detalle técnico: {exc}")
+        st.caption(f"Tipo de error: {type(exc).__name__}")
 
 
 def render_history_stepper(prefix: str, evaluations: list[dict[str, object]]) -> dict[str, object]:
@@ -562,6 +599,39 @@ def render_history_stepper(prefix: str, evaluations: list[dict[str, object]]) ->
         f"{format_timestamp(selected_evaluation['created_at'])}"
     )
     return selected_evaluation
+
+
+def render_history_page_controls(prefix: str, page_size: int = HISTORY_PAGE_SIZE) -> tuple[int, int]:
+    """Render simple previous/next pagination controls backed by session state."""
+    offset_key = f"{prefix}_history_offset"
+    if offset_key not in st.session_state:
+        st.session_state[offset_key] = 0
+
+    offset = max(0, int(st.session_state[offset_key]))
+    current_page = (offset // page_size) + 1
+
+    prev_col, center_col, next_col = st.columns([1, 2, 1])
+    with prev_col:
+        if st.button(
+            "Página anterior",
+            key=f"{offset_key}_prev",
+            disabled=offset == 0,
+            use_container_width=True,
+        ):
+            st.session_state[offset_key] = max(0, offset - page_size)
+            st.rerun()
+    with center_col:
+        st.caption(f"Página {current_page} · {page_size} registros por página")
+    with next_col:
+        if st.button(
+            "Página siguiente",
+            key=f"{offset_key}_next",
+            use_container_width=True,
+        ):
+            st.session_state[offset_key] = offset + page_size
+            st.rerun()
+
+    return offset, page_size
 
 
 def render_text_history_snapshot(evaluation: dict[str, object]) -> None:
@@ -786,10 +856,11 @@ def render_text_expert_review_form(
             responses,
             observations=cleaned_observations,
         )
+        clear_history_caches()
         st.session_state["text_expert_review_flash"] = "La evaluación experta de texto se guardó correctamente."
         st.rerun()
     except Exception as exc:
-        st.error(str(exc))
+        render_safe_exception(exc, "No se pudo guardar la evaluación experta de texto.")
 
 
 def render_image_expert_review_form(
@@ -898,10 +969,11 @@ def render_image_expert_review_form(
             responses,
             observations=cleaned_observations,
         )
+        clear_history_caches()
         st.session_state["image_expert_review_flash"] = "La evaluación experta de imágenes se guardó correctamente."
         st.rerun()
     except Exception as exc:
-        st.error(str(exc))
+        render_safe_exception(exc, "No se pudo guardar la evaluación experta de imágenes.")
 
 
 def render_scored_review_block(
@@ -1042,20 +1114,46 @@ def render_history_tab(storage_status: StorageStatus, write_access_status: Write
         st.info("El historial requiere una base PostgreSQL configurada mediante DATABASE_URL.")
         return
 
-    st.caption(f"Mostrando las {HISTORY_LIMIT} evaluaciones más recientes de cada módulo.")
-
-    try:
-        text_history = list_recent_text_evaluations(limit=HISTORY_LIMIT)
-        image_history = list_recent_image_evaluations(limit=HISTORY_LIMIT)
-    except Exception as exc:
-        st.error(f"No se pudo cargar el historial: {exc}")
+    history_gate_key = "history_load_enabled"
+    if not bool(st.session_state.get(history_gate_key, False)):
+        st.info(
+            "El historial está en carga bajo demanda para reducir consumo de egress. "
+            "Pulsa el botón cuando realmente necesites consultarlo."
+        )
+        if st.button("Cargar historial", key="load_history_button", use_container_width=True):
+            st.session_state[history_gate_key] = True
+            st.rerun()
         return
 
-    text_history_tab, image_history_tab = st.tabs(["Texto", "Imágenes"])
+    st.caption(
+        "El historial se carga por páginas para reducir transferencia y consumo de egress."
+    )
+
+    text_history_tab, image_history_tab = st.tabs(
+        ["Texto", "Imágenes"],
+        key="history_sections",
+        on_change="rerun",
+    )
+
     with text_history_tab:
-        render_text_history_section(text_history, storage_status, write_access_status)
+        if is_tab_selected(text_history_tab):
+            text_offset, text_limit = render_history_page_controls("text")
+            try:
+                text_history = get_cached_text_history(limit=text_limit, offset=text_offset)
+            except Exception as exc:
+                st.error(f"No se pudo cargar el historial de texto ({type(exc).__name__}).")
+                return
+            render_text_history_section(text_history, storage_status, write_access_status)
+
     with image_history_tab:
-        render_image_history_section(image_history, storage_status, write_access_status)
+        if is_tab_selected(image_history_tab):
+            image_offset, image_limit = render_history_page_controls("image")
+            try:
+                image_history = get_cached_image_history(limit=image_limit, offset=image_offset)
+            except Exception as exc:
+                st.error(f"No se pudo cargar el historial de imágenes ({type(exc).__name__}).")
+                return
+            render_image_history_section(image_history, storage_status, write_access_status)
 
 
 def main() -> None:
@@ -1069,7 +1167,11 @@ def main() -> None:
     render_storage_banner(storage_status)
     render_write_access_panel(write_password, write_access_status)
 
-    text_tab, image_tab, history_tab = st.tabs(["Evaluación de texto", "Evaluación de imágenes", "Historial"])
+    text_tab, image_tab, history_tab = st.tabs(
+        ["Evaluación de texto", "Evaluación de imágenes", "Historial"],
+        key="main_sections",
+        on_change="rerun",
+    )
 
     with text_tab:
         st.subheader("Módulo de texto")
@@ -1121,7 +1223,7 @@ def main() -> None:
                 render_text_results(text_results)
                 persist_text_results(storage_status, write_access_status, reference_text, text_results)
             except Exception as exc:
-                st.error(str(exc))
+                render_safe_exception(exc, "No se pudo completar la evaluación de texto.")
 
     with image_tab:
         st.subheader("Módulo de imágenes")
@@ -1203,10 +1305,11 @@ def main() -> None:
                     clip_results,
                 )
             except Exception as exc:
-                st.error(str(exc))
+                render_safe_exception(exc, "No se pudo completar la evaluación de imágenes.")
 
     with history_tab:
-        render_history_tab(storage_status, write_access_status)
+        if is_tab_selected(history_tab):
+            render_history_tab(storage_status, write_access_status)
 
 
 if __name__ == "__main__":
