@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 from urllib import error, request
+from urllib.parse import urlparse
 
 import streamlit as st
 import torch
@@ -27,6 +28,7 @@ from storage import (
     get_storage_status,
     list_recent_image_evaluations,
     list_recent_text_evaluations,
+    resolve_database_url,
     save_image_evaluation,
     save_image_expert_review,
     save_text_evaluation,
@@ -117,6 +119,56 @@ def resolve_supabase_auth_config() -> tuple[str | None, str | None]:
     return supabase_url, supabase_anon_key
 
 
+def extract_project_ref_from_supabase_url(supabase_url: str) -> str | None:
+    parsed = urlparse(supabase_url)
+    host = parsed.netloc.lower()
+    if not host.endswith(".supabase.co"):
+        return None
+    project_ref = host.split(".")[0].strip()
+    return project_ref or None
+
+
+def extract_project_ref_from_database_url(database_url: str) -> str | None:
+    parsed = urlparse(database_url)
+    host = (parsed.hostname or "").lower()
+    username = parsed.username or ""
+
+    if host.startswith("db.") and host.endswith(".supabase.co"):
+        parts = host.split(".")
+        if len(parts) >= 3:
+            return parts[1]
+
+    if "." in username:
+        candidate = username.split(".", 1)[1].strip().lower()
+        if candidate:
+            return candidate
+
+    return None
+
+
+def is_valid_supabase_project_url(supabase_url: str) -> bool:
+    return supabase_url.startswith("https://") and ".supabase.co" in supabase_url
+
+
+def build_supabase_auth_error_message(payload: dict[str, Any]) -> str:
+    error_code = (
+        str(payload.get("code") or "")
+        or str(payload.get("error_code") or "")
+        or str(payload.get("error") or "")
+    ).strip()
+    message = (
+        str(payload.get("msg") or "")
+        or str(payload.get("message") or "")
+        or str(payload.get("error_description") or "")
+        or str(payload.get("error") or "")
+        or "Error de autenticación."
+    ).strip()
+
+    if error_code and error_code.lower() not in message.lower():
+        return f"{message} [{error_code}]"
+    return message
+
+
 def has_supabase_auth_config() -> bool:
     supabase_url, supabase_anon_key = resolve_supabase_auth_config()
     return bool(supabase_url and supabase_anon_key)
@@ -155,21 +207,16 @@ def _supabase_auth_request(
     except error.HTTPError as exc:
         try:
             error_payload = json.loads(exc.read().decode("utf-8"))
-            message = (
-                error_payload.get("msg")
-                or error_payload.get("message")
-                or error_payload.get("error_description")
-                or error_payload.get("error")
-                or "Error de autenticación."
-            )
+            message = build_supabase_auth_error_message(dict(error_payload))
         except Exception:
             message = "Error de autenticación."
 
-        if exc.code in {400, 401, 403}:
-            raise ValueError(str(message))
-        raise RuntimeError(f"Supabase Auth no disponible ({exc.code}).") from exc
+        if 400 <= exc.code < 500:
+            raise ValueError(f"{message} (HTTP {exc.code})")
+        raise RuntimeError(f"Supabase Auth no disponible (HTTP {exc.code}).") from exc
     except error.URLError as exc:
-        raise RuntimeError("No se pudo conectar con Supabase Auth.") from exc
+        reason = str(getattr(exc, "reason", "error de red"))
+        raise RuntimeError(f"No se pudo conectar con Supabase Auth: {reason}.") from exc
 
 
 def _store_supabase_session(auth_response: dict[str, Any]) -> None:
@@ -258,6 +305,31 @@ def require_app_authentication() -> None:
             "Define SUPABASE_URL y SUPABASE_ANON_KEY en secretos para habilitar login con Supabase."
         )
         st.stop()
+    if not is_valid_supabase_project_url(supabase_url):
+        st.subheader("SUPABASE_URL inválida")
+        st.error(
+            "SUPABASE_URL debe apuntar al proyecto, por ejemplo: "
+            "`https://<project-ref>.supabase.co`."
+        )
+        st.caption(
+            "No uses hosts de pooler (`aws-*.pooler.supabase.com`) para autenticación."
+        )
+        st.stop()
+
+    database_url = resolve_database_url()
+    auth_project_ref = extract_project_ref_from_supabase_url(supabase_url)
+    db_project_ref = extract_project_ref_from_database_url(database_url) if database_url else None
+    if auth_project_ref and db_project_ref and auth_project_ref != db_project_ref:
+        st.subheader("Configuración inconsistente")
+        st.error(
+            "SUPABASE_URL y DATABASE_URL parecen pertenecer a proyectos distintos. "
+            "Auth y DB deben apuntar al mismo project_ref."
+        )
+        st.caption(
+            f"Auth project_ref detectado: `{auth_project_ref}` | "
+            f"DB project_ref detectado: `{db_project_ref}`"
+        )
+        st.stop()
 
     if _refresh_supabase_session_if_needed(supabase_url, supabase_anon_key):
         return
@@ -271,7 +343,7 @@ def require_app_authentication() -> None:
         submitted = st.form_submit_button("Ingresar", use_container_width=True)
 
     if submitted:
-        email_value = user_email.strip()
+        email_value = user_email.strip().lower()
         if not email_value or not user_password:
             st.error("Ingresa correo y contraseña.")
             st.stop()
@@ -285,12 +357,23 @@ def require_app_authentication() -> None:
             )
             _store_supabase_session(auth_response)
             st.rerun()
-        except ValueError:
+        except ValueError as exc:
             clear_authenticated_session()
-            st.error("Credenciales inválidas o cuenta no confirmada.")
-        except Exception:
+            error_message = str(exc)
+            st.error(f"Login rechazado por Supabase: {error_message}")
+            lower_message = error_message.lower()
+            if "email_not_confirmed" in lower_message or "not confirmed" in lower_message:
+                st.info(
+                    "Tu usuario existe pero no está confirmado. "
+                    "En Supabase revisa Authentication > Users y confirma el email."
+                )
+            elif "invalid_credentials" in lower_message or "invalid login credentials" in lower_message:
+                st.info(
+                    "Verifica correo/contraseña y confirma que ese usuario tenga método email+password."
+                )
+        except Exception as exc:
             clear_authenticated_session()
-            st.error("No fue posible autenticarse con Supabase en este momento.")
+            st.error(f"No fue posible autenticarse con Supabase en este momento: {exc}")
 
     st.stop()
 
