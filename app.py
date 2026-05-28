@@ -357,23 +357,12 @@ def require_app_authentication() -> None:
             )
             _store_supabase_session(auth_response)
             st.rerun()
-        except ValueError as exc:
+        except ValueError:
             clear_authenticated_session()
-            error_message = str(exc)
-            st.error(f"Login rechazado por Supabase: {error_message}")
-            lower_message = error_message.lower()
-            if "email_not_confirmed" in lower_message or "not confirmed" in lower_message:
-                st.info(
-                    "Tu usuario existe pero no está confirmado. "
-                    "En Supabase revisa Authentication > Users y confirma el email."
-                )
-            elif "invalid_credentials" in lower_message or "invalid login credentials" in lower_message:
-                st.info(
-                    "Verifica correo/contraseña y confirma que ese usuario tenga método email+password."
-                )
-        except Exception as exc:
+            st.error("No fue posible autenticarse con Supabase en este momento.")
+        except Exception:
             clear_authenticated_session()
-            st.error(f"No fue posible autenticarse con Supabase en este momento: {exc}")
+            st.error("No fue posible autenticarse con Supabase en este momento.")
 
     st.stop()
 
@@ -909,7 +898,7 @@ def render_text_history_snapshot(evaluation: dict[str, object]) -> None:
     st.text_area(
         "Fuente",
         value=str(evaluation["source_text"]),
-        height=140,
+        height=220,
         disabled=True,
         key=f"text_source_snapshot_{evaluation['id']}",
     )
@@ -919,7 +908,7 @@ def render_text_history_snapshot(evaluation: dict[str, object]) -> None:
             st.text_area(
                 candidate["label"],
                 value=str(candidate["candidate_text"]),
-                height=120,
+                height=200,
                 disabled=True,
                 key=f"text_candidate_snapshot_{evaluation['id']}_{candidate['slot']}",
             )
@@ -1449,26 +1438,26 @@ def main() -> None:
         with st.form("text_evaluation_form"):
             source_text = st.text_area(
                 "Fuente",
-                height=180,
+                height=280,
                 placeholder="Escribe aquí el texto fuente o referencia principal.",
             )
             col1, col2, col3 = st.columns(3)
             with col1:
                 text_1 = st.text_area(
                     "Texto 1",
-                    height=160,
+                    height=240,
                     placeholder="Ingresa el primer texto a comparar con la fuente.",
                 )
             with col2:
                 text_2 = st.text_area(
                     "Texto 2",
-                    height=160,
+                    height=240,
                     placeholder="Ingresa el segundo texto a comparar con la fuente.",
                 )
             with col3:
                 text_3 = st.text_area(
                     "Texto 3",
-                    height=160,
+                    height=240,
                     placeholder="Ingresa el tercer texto a comparar con la fuente.",
                 )
             evaluate_text = st.form_submit_button("Evaluar textos", use_container_width=True)
@@ -1513,19 +1502,19 @@ def main() -> None:
             with text_col1:
                 image_text_1 = st.text_area(
                     "Texto para Imagen 1",
-                    height=120,
+                    height=180,
                     placeholder="Describe lo que debería representar la Imagen 1.",
                 )
             with text_col2:
                 image_text_2 = st.text_area(
                     "Texto para Imagen 2",
-                    height=120,
+                    height=180,
                     placeholder="Describe lo que debería representar la Imagen 2.",
                 )
             with text_col3:
                 image_text_3 = st.text_area(
                     "Texto para Imagen 3",
-                    height=120,
+                    height=180,
                     placeholder="Describe lo que debería representar la Imagen 3.",
                 )
 
