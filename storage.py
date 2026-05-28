@@ -180,10 +180,6 @@ def resolve_database_url() -> str | None:
     return _append_sslmode(database_url, sslmode)
 
 
-def resolve_write_password() -> str | None:
-    return _get_secret_value("STORAGE_WRITE_PASSWORD") or os.getenv("STORAGE_WRITE_PASSWORD")
-
-
 def resolve_db_auto_migrate() -> bool:
     raw_value = _get_secret_value("DB_AUTO_MIGRATE") or os.getenv("DB_AUTO_MIGRATE")
     if raw_value is None:

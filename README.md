@@ -124,6 +124,11 @@ streamlit run app.py
 
 La app soporta persistencia opcional en PostgreSQL mediante `DATABASE_URL`.
 
+La autenticación de acceso es obligatoria con Supabase Auth:
+
+- sin inicio de sesión válido, la app no carga módulos ni historial
+- al iniciar sesión correctamente, se habilita la escritura en base de datos
+
 Si `DATABASE_URL` no está configurada:
 
 - la app sigue evaluando texto e imagen
@@ -132,11 +137,11 @@ Si `DATABASE_URL` no está configurada:
 
 Si `DATABASE_URL` está configurada:
 
-- crea las tablas necesarias automáticamente en el arranque
+- valida que las tablas requeridas existan
 - guarda evaluaciones de texto
 - guarda evaluaciones de imágenes
 - habilita el tab `Historial`
-- exige una contraseña de escritura si configuras `STORAGE_WRITE_PASSWORD`
+- exige autenticación Supabase antes de cargar la app
 
 ### Secretos esperados
 
@@ -147,7 +152,8 @@ Ejemplo:
 ```toml
 DATABASE_URL = "postgresql+psycopg://postgres.qcsxbtzfhlimqiyftaxc:TU_PASSWORD@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
 DB_SSLMODE = "require"
-STORAGE_WRITE_PASSWORD = "CAMBIA_ESTA_CLAVE"
+SUPABASE_URL = "https://TU_PROJECT_REF.supabase.co"
+SUPABASE_ANON_KEY = "TU_SUPABASE_ANON_KEY"
 DB_AUTO_MIGRATE = "false"
 ```
 
@@ -156,7 +162,7 @@ Notas:
 - `DB_SSLMODE` es opcional si ya lo incluyes dentro de `DATABASE_URL`
 - para Supabase Shared Pooler, lo esperado en esta app es `sslmode=require`
 - las imágenes se almacenan en PostgreSQL como binario (`BYTEA`) en esta v1
-- si defines `STORAGE_WRITE_PASSWORD`, la app solo guardará datos cuando el usuario la ingrese correctamente en la barra lateral
+- `SUPABASE_URL` y `SUPABASE_ANON_KEY` se usan para login (email/contraseña) con Supabase Auth
 - `DB_AUTO_MIGRATE` controla si la app ejecuta `create_all()` y `ENABLE RLS` al arrancar:
   - `true`: útil solo para bootstrap/migración con rol administrador
   - `false`: recomendado en producción con rol de aplicación de privilegios mínimos
@@ -166,7 +172,8 @@ Notas:
 ```toml
 DATABASE_URL = "postgresql+psycopg://postgres.qcsxbtzfhlimqiyftaxc:TU_PASSWORD@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
 DB_SSLMODE = "require"
-STORAGE_WRITE_PASSWORD = "CAMBIA_POR_UNA_CLAVE_SEGURA"
+SUPABASE_URL = "https://TU_PROJECT_REF.supabase.co"
+SUPABASE_ANON_KEY = "TU_SUPABASE_ANON_KEY"
 DB_AUTO_MIGRATE = "false"
 ```
 
@@ -182,7 +189,8 @@ Ejemplo:
 ```toml
 DATABASE_URL = "postgresql+psycopg://historical_app:TU_PASSWORD_URL_ENCODED@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
 DB_SSLMODE = "require"
-STORAGE_WRITE_PASSWORD = "CAMBIA_POR_UNA_CLAVE_SEGURA"
+SUPABASE_URL = "https://TU_PROJECT_REF.supabase.co"
+SUPABASE_ANON_KEY = "TU_SUPABASE_ANON_KEY"
 DB_AUTO_MIGRATE = "false"
 ```
 
@@ -191,7 +199,8 @@ DB_AUTO_MIGRATE = "false"
 ```toml
 DATABASE_URL = "postgresql+psycopg://postgres.qcsxbtzfhlimqiyftaxc:TU_PASSWORD@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
 DB_SSLMODE = "require"
-STORAGE_WRITE_PASSWORD = "CAMBIA_POR_UNA_CLAVE_SEGURA"
+SUPABASE_URL = "https://TU_PROJECT_REF.supabase.co"
+SUPABASE_ANON_KEY = "TU_SUPABASE_ANON_KEY"
 DB_AUTO_MIGRATE = "false"
 ```
 

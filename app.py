@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import hmac
 import io
+import json
 import math
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
+from urllib import error, request
 
 import streamlit as st
 import torch
@@ -24,7 +27,6 @@ from storage import (
     get_storage_status,
     list_recent_image_evaluations,
     list_recent_text_evaluations,
-    resolve_write_password,
     save_image_evaluation,
     save_image_expert_review,
     save_text_evaluation,
@@ -47,6 +49,8 @@ SCORE_CAPTIONS: Final[list[str]] = [
 ]
 SCORE_LABELS: Final[dict[int, str]] = dict(zip(SCORE_OPTIONS, SCORE_CAPTIONS))
 HISTORY_PAGE_SIZE: Final[int] = 5
+SUPABASE_SESSION_KEY: Final[str] = "supabase_auth_session"
+SUPABASE_REFRESH_MARGIN_SECONDS: Final[int] = 60
 
 TEXT_EXPERT_CRITERIA: Final[list[tuple[str, str, str]]] = [
     ("fidelidad_factual", "Fidelidad factual", "Conserva hechos, relaciones y atributos de la fuente sin errores."),
@@ -87,6 +91,208 @@ class WriteAccessStatus:
     unlocked: bool
     can_write: bool
     message: str
+
+
+def clear_authenticated_session() -> None:
+    st.session_state["app_authenticated"] = False
+    st.session_state["write_access_granted"] = False
+    st.session_state.pop(SUPABASE_SESSION_KEY, None)
+
+
+def _get_secret_value(key: str) -> str | None:
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        return None
+    return None
+
+
+def resolve_supabase_auth_config() -> tuple[str | None, str | None]:
+    supabase_url = _get_secret_value("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+    supabase_anon_key = _get_secret_value("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY")
+
+    if supabase_url:
+        supabase_url = supabase_url.rstrip("/")
+    return supabase_url, supabase_anon_key
+
+
+def has_supabase_auth_config() -> bool:
+    supabase_url, supabase_anon_key = resolve_supabase_auth_config()
+    return bool(supabase_url and supabase_anon_key)
+
+
+def _supabase_auth_request(
+    *,
+    supabase_url: str,
+    supabase_anon_key: str,
+    path: str,
+    method: str = "POST",
+    payload: dict[str, Any] | None = None,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    body = b""
+    headers = {"apikey": supabase_anon_key}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+
+    http_request = request.Request(
+        f"{supabase_url}{path}",
+        data=body if method.upper() != "GET" else None,
+        headers=headers,
+        method=method.upper(),
+    )
+
+    try:
+        with request.urlopen(http_request, timeout=20) as response:
+            raw_body = response.read().decode("utf-8")
+            if not raw_body:
+                return {}
+            return dict(json.loads(raw_body))
+    except error.HTTPError as exc:
+        try:
+            error_payload = json.loads(exc.read().decode("utf-8"))
+            message = (
+                error_payload.get("msg")
+                or error_payload.get("message")
+                or error_payload.get("error_description")
+                or error_payload.get("error")
+                or "Error de autenticación."
+            )
+        except Exception:
+            message = "Error de autenticación."
+
+        if exc.code in {400, 401, 403}:
+            raise ValueError(str(message))
+        raise RuntimeError(f"Supabase Auth no disponible ({exc.code}).") from exc
+    except error.URLError as exc:
+        raise RuntimeError("No se pudo conectar con Supabase Auth.") from exc
+
+
+def _store_supabase_session(auth_response: dict[str, Any]) -> None:
+    access_token = str(auth_response.get("access_token") or "")
+    refresh_token = str(auth_response.get("refresh_token") or "")
+    expires_in = int(auth_response.get("expires_in") or 3600)
+    user = auth_response.get("user") or {}
+    user_email = str(user.get("email") or "")
+
+    if not access_token or not refresh_token:
+        raise RuntimeError("Supabase Auth no devolvió una sesión válida.")
+
+    st.session_state[SUPABASE_SESSION_KEY] = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_at": int(time.time()) + max(30, expires_in),
+        "user_email": user_email,
+    }
+    st.session_state["app_authenticated"] = True
+    st.session_state["write_access_granted"] = True
+
+
+def _refresh_supabase_session_if_needed(supabase_url: str, supabase_anon_key: str) -> bool:
+    session = st.session_state.get(SUPABASE_SESSION_KEY)
+    if not isinstance(session, dict):
+        return False
+
+    access_token = str(session.get("access_token") or "")
+    refresh_token = str(session.get("refresh_token") or "")
+    expires_at = int(session.get("expires_at") or 0)
+    now = int(time.time())
+
+    if access_token and expires_at - now > SUPABASE_REFRESH_MARGIN_SECONDS:
+        st.session_state["app_authenticated"] = True
+        st.session_state["write_access_granted"] = True
+        return True
+
+    if not refresh_token:
+        clear_authenticated_session()
+        return False
+
+    try:
+        refreshed = _supabase_auth_request(
+            supabase_url=supabase_url,
+            supabase_anon_key=supabase_anon_key,
+            path="/auth/v1/token?grant_type=refresh_token",
+            payload={"refresh_token": refresh_token},
+        )
+    except Exception:
+        clear_authenticated_session()
+        return False
+
+    _store_supabase_session(refreshed)
+    return True
+
+
+def revoke_supabase_session() -> None:
+    session = st.session_state.get(SUPABASE_SESSION_KEY) or {}
+    access_token = str(session.get("access_token") or "")
+    if not access_token:
+        return
+
+    supabase_url, supabase_anon_key = resolve_supabase_auth_config()
+    if not supabase_url or not supabase_anon_key:
+        return
+
+    try:
+        _supabase_auth_request(
+            supabase_url=supabase_url,
+            supabase_anon_key=supabase_anon_key,
+            path="/auth/v1/logout",
+            payload=None,
+            access_token=access_token,
+        )
+    except Exception:
+        # Logout revocation errors should not block local logout.
+        pass
+
+
+def require_app_authentication() -> None:
+    """Block app rendering until the user authenticates with Supabase Auth."""
+    supabase_url, supabase_anon_key = resolve_supabase_auth_config()
+    if not supabase_url or not supabase_anon_key:
+        st.subheader("Configuración de autenticación incompleta")
+        st.error(
+            "Define SUPABASE_URL y SUPABASE_ANON_KEY en secretos para habilitar login con Supabase."
+        )
+        st.stop()
+
+    if _refresh_supabase_session_if_needed(supabase_url, supabase_anon_key):
+        return
+
+    st.subheader("Iniciar sesión")
+    st.caption("Autenticación gestionada por Supabase Auth (email y contraseña).")
+
+    with st.form("supabase_login_form", clear_on_submit=True):
+        user_email = st.text_input("Correo electrónico")
+        user_password = st.text_input("Contraseña", type="password")
+        submitted = st.form_submit_button("Ingresar", use_container_width=True)
+
+    if submitted:
+        email_value = user_email.strip()
+        if not email_value or not user_password:
+            st.error("Ingresa correo y contraseña.")
+            st.stop()
+
+        try:
+            auth_response = _supabase_auth_request(
+                supabase_url=supabase_url,
+                supabase_anon_key=supabase_anon_key,
+                path="/auth/v1/token?grant_type=password",
+                payload={"email": email_value, "password": user_password},
+            )
+            _store_supabase_session(auth_response)
+            st.rerun()
+        except ValueError:
+            clear_authenticated_session()
+            st.error("Credenciales inválidas o cuenta no confirmada.")
+        except Exception:
+            clear_authenticated_session()
+            st.error("No fue posible autenticarse con Supabase en este momento.")
+
+    st.stop()
 
 
 def parse_references(text: str) -> list[str]:
@@ -452,64 +658,46 @@ def render_storage_banner(storage_status: StorageStatus) -> None:
         st.warning(storage_status.message)
 
 
-def get_write_access_status(write_password: str | None) -> WriteAccessStatus:
-    if not write_password:
+def get_write_access_status() -> WriteAccessStatus:
+    if not has_supabase_auth_config():
         return WriteAccessStatus(
             configured=False,
             unlocked=False,
             can_write=False,
-            message="Guardado protegido: configura STORAGE_WRITE_PASSWORD para habilitar escritura en la base.",
+            message="Configura SUPABASE_URL y SUPABASE_ANON_KEY para habilitar autenticación y guardado.",
         )
 
-    unlocked = bool(st.session_state.get("write_access_granted", False))
+    unlocked = bool(st.session_state.get("app_authenticated", False))
     if unlocked:
+        session = st.session_state.get(SUPABASE_SESSION_KEY) or {}
+        user_email = str(session.get("user_email") or "")
+        label = f"Sesión autenticada ({user_email})." if user_email else "Sesión autenticada."
         return WriteAccessStatus(
             configured=True,
             unlocked=True,
             can_write=True,
-            message="Guardado habilitado en esta sesión.",
+            message=f"{label} Guardado habilitado en esta sesión.",
         )
 
     return WriteAccessStatus(
         configured=True,
         unlocked=False,
         can_write=False,
-        message="Ingresa la contraseña de escritura en la barra lateral para guardar resultados.",
+        message="Debes iniciar sesión con Supabase para usar la aplicación y guardar resultados.",
     )
 
 
-def render_write_access_panel(write_password: str | None, write_access_status: WriteAccessStatus) -> None:
+def render_session_panel(write_access_status: WriteAccessStatus) -> None:
     with st.sidebar:
-        st.subheader("Acceso de escritura")
-        st.caption("La app puede ser pública, pero el guardado en la base requiere esta contraseña.")
-
-        if not write_password:
-            st.warning(write_access_status.message)
-            return
-
+        st.subheader("Sesión")
         if write_access_status.unlocked:
             st.success(write_access_status.message)
-            if st.button("Bloquear guardado", use_container_width=True):
-                st.session_state["write_access_granted"] = False
+            if st.button("Cerrar sesión", key="logout_session_button", use_container_width=True):
+                revoke_supabase_session()
+                clear_authenticated_session()
                 st.rerun()
-            return
-
-        with st.form("write_access_form", clear_on_submit=True):
-            password_input = st.text_input(
-                "Contraseña para guardar",
-                type="password",
-            )
-            submitted = st.form_submit_button("Habilitar guardado", use_container_width=True)
-
-        if submitted:
-            if hmac.compare_digest(password_input, write_password):
-                st.session_state["write_access_granted"] = True
-                st.rerun()
-
-            st.session_state["write_access_granted"] = False
-            st.error("Contraseña incorrecta. El guardado sigue bloqueado.")
-
-        st.info(write_access_status.message)
+        else:
+            st.warning(write_access_status.message)
 
 
 def persist_text_results(
@@ -1161,11 +1349,11 @@ def main() -> None:
 
     st.title(APP_TITLE)
     st.caption("Aplicación académica para evaluación multimodal con métricas de texto e imagen.")
+    require_app_authentication()
+    write_access_status = get_write_access_status()
+    render_session_panel(write_access_status)
     storage_status = get_storage_status()
-    write_password = resolve_write_password()
-    write_access_status = get_write_access_status(write_password)
     render_storage_banner(storage_status)
-    render_write_access_panel(write_password, write_access_status)
 
     text_tab, image_tab, history_tab = st.tabs(
         ["Evaluación de texto", "Evaluación de imágenes", "Historial"],
