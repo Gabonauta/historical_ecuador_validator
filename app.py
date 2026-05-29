@@ -898,7 +898,7 @@ def render_text_history_snapshot(evaluation: dict[str, object]) -> None:
     st.text_area(
         "Fuente",
         value=str(evaluation["source_text"]),
-        height=320,
+        height=360,
         disabled=True,
         key=f"text_source_snapshot_{evaluation['id']}",
     )
@@ -908,7 +908,7 @@ def render_text_history_snapshot(evaluation: dict[str, object]) -> None:
             st.text_area(
                 candidate["label"],
                 value=str(candidate["candidate_text"]),
-                height=320,
+                height=360,
                 disabled=True,
                 key=f"text_candidate_snapshot_{evaluation['id']}_{candidate['slot']}",
             )
@@ -1438,26 +1438,26 @@ def main() -> None:
         with st.form("text_evaluation_form"):
             source_text = st.text_area(
                 "Fuente",
-                height=320,
+                height=360,
                 placeholder="Escribe aquí el texto fuente o referencia principal.",
             )
             col1, col2, col3 = st.columns(3)
             with col1:
                 text_1 = st.text_area(
                     "Texto 1",
-                    height=320,
+                    height=360,
                     placeholder="Ingresa el primer texto a comparar con la fuente.",
                 )
             with col2:
                 text_2 = st.text_area(
                     "Texto 2",
-                    height=320,
+                    height=360,
                     placeholder="Ingresa el segundo texto a comparar con la fuente.",
                 )
             with col3:
                 text_3 = st.text_area(
                     "Texto 3",
-                    height=320,
+                    height=360,
                     placeholder="Ingresa el tercer texto a comparar con la fuente.",
                 )
             evaluate_text = st.form_submit_button("Evaluar textos", use_container_width=True)
@@ -1502,19 +1502,19 @@ def main() -> None:
             with text_col1:
                 image_text_1 = st.text_area(
                     "Texto para Imagen 1",
-                    height=320,
+                    height=360,
                     placeholder="Describe lo que debería representar la Imagen 1.",
                 )
             with text_col2:
                 image_text_2 = st.text_area(
                     "Texto para Imagen 2",
-                    height=320,
+                    height=360,
                     placeholder="Describe lo que debería representar la Imagen 2.",
                 )
             with text_col3:
                 image_text_3 = st.text_area(
                     "Texto para Imagen 3",
-                    height=320,
+                    height=360,
                     placeholder="Describe lo que debería representar la Imagen 3.",
                 )
 
