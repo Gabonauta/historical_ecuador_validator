@@ -1022,14 +1022,16 @@ def render_expert_evaluation_header(form_prefix: str) -> tuple[str, str, str]:
 
 
 def render_score_input(label: str, key: str, help_text: str) -> int | None:
+    st.markdown(f"**{label}**")
+    st.caption(help_text)
     return st.segmented_control(
-        label,
+        f"Selecciona un puntaje para {label.lower()}",
         SCORE_OPTIONS,
         default=None,
         required=True,
         key=key,
-        help=help_text,
         width="stretch",
+        label_visibility="collapsed",
     )
 
 
