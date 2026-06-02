@@ -964,10 +964,7 @@ def render_image_history_snapshot(evaluation: dict[str, object]) -> None:
             st.caption(asset["filename"])
             st.caption(f"SHA256: {asset['sha256']}")
 
-    st.caption(
-        "Las previsualizaciones guardadas se cargan bajo demanda para reducir egress en Supabase."
-    )
-    preview_toggle_key = f"load_previews_{evaluation['id']}"
+        preview_toggle_key = f"load_previews_{evaluation['id']}"
     load_previews = st.toggle(
         "Cargar previsualizaciones guardadas",
         key=preview_toggle_key,
@@ -1344,7 +1341,7 @@ def render_text_history_section(
     write_access_status: WriteAccessStatus,
     offset: int = 0,
 ) -> None:
-    st.subheader("Historial de texto")
+    st.subheader("Historial de textos turisticos")
     flash_message = pop_flash_message("text_expert_review_flash")
     if flash_message:
         st.success(flash_message)
@@ -1390,18 +1387,13 @@ def render_history_tab(storage_status: StorageStatus, write_access_status: Write
 
     history_gate_key = "history_load_enabled"
     if not bool(st.session_state.get(history_gate_key, False)):
-        st.info(
-            "El historial está en carga bajo demanda para reducir consumo de egress. "
-            "Pulsa el botón cuando realmente necesites consultarlo."
-        )
+        st.info("Pulsa el botón cuando realmente necesites consultar el historial.")
         if st.button("Cargar historial", key="load_history_button", use_container_width=True):
             st.session_state[history_gate_key] = True
             st.rerun()
         return
 
-    st.caption(
-        "El historial se carga por páginas para reducir transferencia y consumo de egress."
-    )
+    st.caption("El historial se muestra por páginas.")
 
     text_history_tab, image_history_tab = st.tabs(
         ["Texto", "Imágenes"],
