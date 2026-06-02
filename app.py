@@ -816,9 +816,13 @@ def persist_image_results(
         st.caption(f"Tipo de error: {type(exc).__name__}")
 
 
-def render_history_stepper(prefix: str, evaluations: list[dict[str, object]]) -> dict[str, object]:
+def render_history_stepper(
+    prefix: str,
+    evaluations: list[dict[str, object]],
+    start_index: int = 0,
+) -> dict[str, object]:
     """Emulate a stepper with segmented control + prev/next for current Streamlit."""
-    step_labels = [str(index + 1) for index in range(len(evaluations))]
+    step_labels = [str(start_index + index + 1) for index in range(len(evaluations))]
     selector_key = f"{prefix}_history_stepper"
 
     if st.session_state.get(selector_key) not in step_labels:
@@ -829,7 +833,7 @@ def render_history_stepper(prefix: str, evaluations: list[dict[str, object]]) ->
 
     prev_col, center_col, next_col = st.columns([1, 4, 1])
     with prev_col:
-        if st.button("Anterior", key=f"{selector_key}_prev", disabled=current_index == 0, use_container_width=True):
+        if st.button("⬅️ Anterior", key=f"{selector_key}_prev", disabled=current_index == 0, use_container_width=True):
             st.session_state[selector_key] = step_labels[current_index - 1]
             st.rerun()
     with center_col:
@@ -843,7 +847,7 @@ def render_history_stepper(prefix: str, evaluations: list[dict[str, object]]) ->
         )
     with next_col:
         if st.button(
-            "Siguiente",
+            "Siguiente ➡️",
             key=f"{selector_key}_next",
             disabled=current_index == len(step_labels) - 1,
             use_container_width=True,
@@ -855,13 +859,13 @@ def render_history_stepper(prefix: str, evaluations: list[dict[str, object]]) ->
     resolved_index = step_labels.index(resolved_label)
     selected_evaluation = evaluations[resolved_index]
     st.caption(
-        f"Evaluación {resolved_index + 1} de {len(evaluations)} · "
+        f"Registro {start_index + resolved_index + 1} · "
         f"{format_timestamp(selected_evaluation['created_at'])}"
     )
     return selected_evaluation
 
 
-def render_history_page_controls(prefix: str, page_size: int = HISTORY_PAGE_SIZE) -> tuple[int, int]:
+def render_history_page_controls(prefix: str, page_size: int = HISTORY_PAGE_SIZE) -> tuple[int, int, int]:
     """Render simple previous/next pagination controls backed by session state."""
     offset_key = f"{prefix}_history_offset"
     if offset_key not in st.session_state:
@@ -873,7 +877,7 @@ def render_history_page_controls(prefix: str, page_size: int = HISTORY_PAGE_SIZE
     prev_col, center_col, next_col = st.columns([1, 2, 1])
     with prev_col:
         if st.button(
-            "Página anterior",
+            "⬅️ Página anterior",
             key=f"{offset_key}_prev",
             disabled=offset == 0,
             use_container_width=True,
@@ -881,17 +885,25 @@ def render_history_page_controls(prefix: str, page_size: int = HISTORY_PAGE_SIZE
             st.session_state[offset_key] = max(0, offset - page_size)
             st.rerun()
     with center_col:
-        st.caption(f"Página {current_page} · {page_size} registros por página")
+        st.markdown(
+            (
+                "<p style='text-align: center; font-weight: 700; margin: 0.35rem 0 0;'>"
+                "Página <span style='color: #ff6b57;'>"
+                f"{current_page}"
+                "</span></p>"
+            ),
+            unsafe_allow_html=True,
+        )
     with next_col:
         if st.button(
-            "Página siguiente",
+            "Página siguiente ➡️",
             key=f"{offset_key}_next",
             use_container_width=True,
         ):
             st.session_state[offset_key] = offset + page_size
             st.rerun()
 
-    return offset, page_size
+    return offset, page_size, current_page
 
 
 def render_text_history_snapshot(evaluation: dict[str, object]) -> None:
@@ -1330,6 +1342,7 @@ def render_text_history_section(
     history: list[dict[str, object]],
     storage_status: StorageStatus,
     write_access_status: WriteAccessStatus,
+    offset: int = 0,
 ) -> None:
     st.subheader("Historial de texto")
     flash_message = pop_flash_message("text_expert_review_flash")
@@ -1339,7 +1352,7 @@ def render_text_history_section(
         st.info("Todavía no hay evaluaciones de texto guardadas.")
         return
 
-    selected_evaluation = render_history_stepper("text", history)
+    selected_evaluation = render_history_stepper("text", history, start_index=offset)
     render_text_history_snapshot(selected_evaluation)
     st.divider()
     render_text_expert_reviews(list(selected_evaluation.get("expert_reviews", [])))
@@ -1351,6 +1364,7 @@ def render_image_history_section(
     history: list[dict[str, object]],
     storage_status: StorageStatus,
     write_access_status: WriteAccessStatus,
+    offset: int = 0,
 ) -> None:
     st.subheader("Historial de imágenes")
     flash_message = pop_flash_message("image_expert_review_flash")
@@ -1360,7 +1374,7 @@ def render_image_history_section(
         st.info("Todavía no hay evaluaciones de imágenes guardadas.")
         return
 
-    selected_evaluation = render_history_stepper("image", history)
+    selected_evaluation = render_history_stepper("image", history, start_index=offset)
     render_image_history_snapshot(selected_evaluation)
     st.divider()
     render_image_expert_reviews(list(selected_evaluation.get("expert_reviews", [])))
@@ -1397,23 +1411,23 @@ def render_history_tab(storage_status: StorageStatus, write_access_status: Write
 
     with text_history_tab:
         if is_tab_selected(text_history_tab):
-            text_offset, text_limit = render_history_page_controls("text")
+            text_offset, text_limit, _text_page = render_history_page_controls("text")
             try:
                 text_history = get_cached_text_history(limit=text_limit, offset=text_offset)
             except Exception as exc:
                 st.error(f"No se pudo cargar el historial de texto ({type(exc).__name__}).")
                 return
-            render_text_history_section(text_history, storage_status, write_access_status)
+            render_text_history_section(text_history, storage_status, write_access_status, offset=text_offset)
 
     with image_history_tab:
         if is_tab_selected(image_history_tab):
-            image_offset, image_limit = render_history_page_controls("image")
+            image_offset, image_limit, _image_page = render_history_page_controls("image")
             try:
                 image_history = get_cached_image_history(limit=image_limit, offset=image_offset)
             except Exception as exc:
                 st.error(f"No se pudo cargar el historial de imágenes ({type(exc).__name__}).")
                 return
-            render_image_history_section(image_history, storage_status, write_access_status)
+            render_image_history_section(image_history, storage_status, write_access_status, offset=image_offset)
 
 
 def main() -> None:
