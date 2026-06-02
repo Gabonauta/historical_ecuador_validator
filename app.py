@@ -724,9 +724,7 @@ def render_image_results(fid_results: dict[str, float], clip_results: dict[str, 
 
 
 def render_storage_banner(storage_status: StorageStatus) -> None:
-    if storage_status.available:
-        st.caption(storage_status.message)
-    else:
+    if not storage_status.available:
         st.warning(storage_status.message)
 
 
