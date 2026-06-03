@@ -966,7 +966,7 @@ def render_image_history_snapshot(evaluation: dict[str, object]) -> None:
     load_previews = st.toggle(
         "Cargar previsualizaciones guardadas",
         key=preview_toggle_key,
-        value=False,
+        value=True,
     )
 
     if not load_previews:
