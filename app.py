@@ -1493,10 +1493,6 @@ def main() -> None:
 
     with image_tab:
         st.subheader("Módulo de imágenes")
-        st.warning(
-            "FID con tan pocas imágenes es una aproximación exploratoria y no una evaluación "
-            "estadísticamente robusta"
-        )
         st.caption(
             "La Imagen 4 es opcional y se usa como referencia adicional en FID. "
             "Para evitar fallos numéricos con un solo target, la app aproxima la distribución "
