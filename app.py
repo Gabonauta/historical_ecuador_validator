@@ -1385,41 +1385,34 @@ def render_history_tab(storage_status: StorageStatus, write_access_status: Write
         st.info("El historial requiere una base PostgreSQL configurada mediante DATABASE_URL.")
         return
 
-    history_gate_key = "history_load_enabled"
-    if not bool(st.session_state.get(history_gate_key, False)):
-        st.info("Pulsa el botón cuando realmente necesites consultar el historial.")
-        if st.button("Cargar historial", key="load_history_button", use_container_width=True):
-            st.session_state[history_gate_key] = True
-            st.rerun()
-        return
-
     st.caption("El historial se muestra por páginas.")
 
-    text_history_tab, image_history_tab = st.tabs(
-        ["Texto", "Imágenes"],
+    image_offset, image_limit, _image_page = render_history_page_controls("image")
+    text_offset, text_limit, _text_page = render_history_page_controls("text")
+
+    try:
+        image_history = get_cached_image_history(limit=image_limit, offset=image_offset)
+    except Exception as exc:
+        st.error(f"No se pudo cargar el historial de imágenes ({type(exc).__name__}).")
+        return
+
+    try:
+        text_history = get_cached_text_history(limit=text_limit, offset=text_offset)
+    except Exception as exc:
+        st.error(f"No se pudo cargar el historial de texto ({type(exc).__name__}).")
+        return
+
+    image_history_tab, text_history_tab = st.tabs(
+        ["Imágenes", "Texto"],
         key="history_sections",
         on_change="rerun",
     )
 
-    with text_history_tab:
-        if is_tab_selected(text_history_tab):
-            text_offset, text_limit, _text_page = render_history_page_controls("text")
-            try:
-                text_history = get_cached_text_history(limit=text_limit, offset=text_offset)
-            except Exception as exc:
-                st.error(f"No se pudo cargar el historial de texto ({type(exc).__name__}).")
-                return
-            render_text_history_section(text_history, storage_status, write_access_status, offset=text_offset)
-
     with image_history_tab:
-        if is_tab_selected(image_history_tab):
-            image_offset, image_limit, _image_page = render_history_page_controls("image")
-            try:
-                image_history = get_cached_image_history(limit=image_limit, offset=image_offset)
-            except Exception as exc:
-                st.error(f"No se pudo cargar el historial de imágenes ({type(exc).__name__}).")
-                return
-            render_image_history_section(image_history, storage_status, write_access_status, offset=image_offset)
+        render_image_history_section(image_history, storage_status, write_access_status, offset=image_offset)
+
+    with text_history_tab:
+        render_text_history_section(text_history, storage_status, write_access_status, offset=text_offset)
 
 
 def main() -> None:
@@ -1433,11 +1426,14 @@ def main() -> None:
     storage_status = get_storage_status()
     render_storage_banner(storage_status)
 
-    text_tab, image_tab, history_tab = st.tabs(
-        ["Evaluación de texto", "Evaluación de imágenes", "Historial"],
+    history_tab, text_tab, image_tab = st.tabs(
+        ["Historial", "Evaluación de texto", "Evaluación de imágenes"],
         key="main_sections",
         on_change="rerun",
     )
+
+    with history_tab:
+        render_history_tab(storage_status, write_access_status)
 
     with text_tab:
         st.subheader("Módulo de texto")
@@ -1569,9 +1565,6 @@ def main() -> None:
             except Exception as exc:
                 render_safe_exception(exc, "No se pudo completar la evaluación de imágenes.")
 
-    with history_tab:
-        if is_tab_selected(history_tab):
-            render_history_tab(storage_status, write_access_status)
 
 
 if __name__ == "__main__":
