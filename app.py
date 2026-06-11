@@ -1387,21 +1387,6 @@ def render_history_tab(storage_status: StorageStatus, write_access_status: Write
 
     st.caption("El historial se muestra por páginas.")
 
-    image_offset, image_limit, _image_page = render_history_page_controls("image")
-    text_offset, text_limit, _text_page = render_history_page_controls("text")
-
-    try:
-        image_history = get_cached_image_history(limit=image_limit, offset=image_offset)
-    except Exception as exc:
-        st.error(f"No se pudo cargar el historial de imágenes ({type(exc).__name__}).")
-        return
-
-    try:
-        text_history = get_cached_text_history(limit=text_limit, offset=text_offset)
-    except Exception as exc:
-        st.error(f"No se pudo cargar el historial de texto ({type(exc).__name__}).")
-        return
-
     image_history_tab, text_history_tab = st.tabs(
         ["Imágenes", "Texto"],
         key="history_sections",
@@ -1409,10 +1394,24 @@ def render_history_tab(storage_status: StorageStatus, write_access_status: Write
     )
 
     with image_history_tab:
-        render_image_history_section(image_history, storage_status, write_access_status, offset=image_offset)
+        if is_tab_selected(image_history_tab):
+            image_offset, image_limit, _image_page = render_history_page_controls("image")
+            try:
+                image_history = get_cached_image_history(limit=image_limit, offset=image_offset)
+            except Exception as exc:
+                st.error(f"No se pudo cargar el historial de imágenes ({type(exc).__name__}).")
+                return
+            render_image_history_section(image_history, storage_status, write_access_status, offset=image_offset)
 
     with text_history_tab:
-        render_text_history_section(text_history, storage_status, write_access_status, offset=text_offset)
+        if is_tab_selected(text_history_tab):
+            text_offset, text_limit, _text_page = render_history_page_controls("text")
+            try:
+                text_history = get_cached_text_history(limit=text_limit, offset=text_offset)
+            except Exception as exc:
+                st.error(f"No se pudo cargar el historial de texto ({type(exc).__name__}).")
+                return
+            render_text_history_section(text_history, storage_status, write_access_status, offset=text_offset)
 
 
 def main() -> None:
